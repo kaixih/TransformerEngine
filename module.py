@@ -321,7 +321,8 @@ def fp8_matmul_wrapper(inp, weight, fp8_meta):
   B_scale_inv = fp8_meta["scaling_fwd"]["scale_inv"][1]
   B_scale_inv_cpu = np.copy(B_scale_inv).flatten()
 
-  D_shape = (A.shape[0], B.shape[1])
+  # weight is actually transposed weight
+  D_shape = (A.shape[0], B.shape[0])
   D = tf.zeros(D_shape, dtype=tf.float32)
   D_cpu = np.copy(D).flatten()
 
@@ -344,31 +345,26 @@ def fp8_matmul_wrapper(inp, weight, fp8_meta):
   return D
 
 
-def gemm(
+def fp8_matmul(
     weight: tf.Tensor,
     weight_fp8: Union[tf.Tensor, None],
     weight_t_fp8: Union[tf.Tensor, None],
     inp: tf.Tensor,
-    fp8: bool,
-    fp8_meta: Dict[str, Any],
-    ) -> tf.Tensor:
-  if not fp8:
-    outputs = tf.matmul(a=inp, b=weight)
-  else:
-    x_fp8 = cast_to_fp8_wrapper(inp, fp8_meta, 0)
-    weight1_fp8 = cast_to_fp8_wrapper(weight, fp8_meta, 1)
-    weight1_t_fp8 = tf.transpose(weight1_fp8)
+    fp8_meta: Dict[str, Any]) -> tf.Tensor:
+  x_fp8 = cast_to_fp8_wrapper(inp, fp8_meta, 0)
+  weight1_fp8 = cast_to_fp8_wrapper(weight, fp8_meta, 1)
+  weight1_t_fp8 = tf.transpose(weight1_fp8)
 
-    print("XXX scale_inv:", fp8_meta["scaling_fwd"]["scale_inv"])
-    print("XXX amax:", fp8_meta["scaling_fwd"]["amax_history"])
-    print("XXX x_fp8 dtype:", x_fp8.dtype)
-    print("XXX x_fp8 shape:", x_fp8.shape)
-    print("XXX weight1_fp8 dtype:", weight1_fp8.dtype)
-    print("XXX weight1_fp8 shape:", weight1_fp8.shape)
-    print("XXX weight1_t_fp8 dtype:", weight1_t_fp8.dtype)
-    print("XXX weight1_t_fp8 shape:", weight1_t_fp8.shape)
+  print("XXX scale_inv:", fp8_meta["scaling_fwd"]["scale_inv"])
+  print("XXX amax:", fp8_meta["scaling_fwd"]["amax_history"])
+  print("XXX x_fp8 dtype:", x_fp8.dtype)
+  print("XXX x_fp8 shape:", x_fp8.shape)
+  print("XXX weight1_fp8 dtype:", weight1_fp8.dtype)
+  print("XXX weight1_fp8 shape:", weight1_fp8.shape)
+  print("XXX weight1_t_fp8 dtype:", weight1_t_fp8.dtype)
+  print("XXX weight1_t_fp8 shape:", weight1_t_fp8.shape)
 
-    outputs = fp8_matmul_wrapper(x_fp8, weight1_t_fp8, fp8_meta)
+  outputs = fp8_matmul_wrapper(x_fp8, weight1_t_fp8, fp8_meta)
 
   return outputs
 
@@ -520,11 +516,13 @@ class MyDense(Layer):
     training = self._get_training_value(training)
     self.pre_forward(inputs, training)
 
-    outputs = gemm(self.kernel,
-                   self.weight1_fp8 if self.fp8 else None,
-                   self.weight1_t_fp8 if self.fp8 else None,
-                   inputs,
-                   self.fp8,
-                   self.fp8_meta)
+    if self.fp8:
+      outputs = fp8_matmul(self.kernel,
+                           self.weight1_fp8 if self.fp8 else None,
+                           self.weight1_t_fp8 if self.fp8 else None,
+                           inputs,
+                           self.fp8_meta)
+    else:
+      outputs = tf.matmul(a=inp, b=weight)
 
     return outputs
