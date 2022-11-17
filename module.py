@@ -347,8 +347,6 @@ def fp8_matmul_wrapper(inp, weight, fp8_meta):
 
 def fp8_matmul(
     weight: tf.Tensor,
-    weight_fp8: Union[tf.Tensor, None],
-    weight_t_fp8: Union[tf.Tensor, None],
     inp: tf.Tensor,
     fp8_meta: Dict[str, Any]) -> tf.Tensor:
   x_fp8 = cast_to_fp8_wrapper(inp, fp8_meta, 0)
@@ -443,38 +441,6 @@ class MyDense(Layer):
     # Allocate scales and amaxes
     self.init_fp8_meta_tensors()
 
-  def set_fp8_weights(self) -> None:
-    if not self.fp8:
-      return
-
-    for i, shape in enumerate(self.fp8_weight_shapes, start=1):
-        weight_cast_attr = f"weight{i}_fp8"
-        weight_transpose_attr = f"weight{i}_t_fp8"
-        print("XXX weight_cast_attr", weight_cast_attr)
-
-        if (
-            hasattr(self, weight_cast_attr)
-            and getattr(self, weight_cast_attr).shape == shape
-        ):
-            return
-
-        setattr(
-            self,
-            weight_cast_attr,
-            tf.zeros(
-                shape=(shape[0], shape[1]),
-                dtype=tf.int8,
-            ),
-        )
-        setattr(
-            self,
-            weight_transpose_attr,
-            tf.zeros(
-                shape=(shape[1], shape[0]),
-                dtype=tf.int8,
-            ),
-        )
-
   def _get_training_value(self, training=None):
     if training is None:
       training = backend.learning_phase()
@@ -488,7 +454,6 @@ class MyDense(Layer):
 
   def pre_forward(self, inputs, training, num_gemms=1):
     self.fp8_init(num_gemms=num_gemms)
-    self.set_fp8_weights()
 
     if self.fp8_meta.get("update_amax_and_scale_fwd", False):
       # Previous iteration was grad_enabled
@@ -518,8 +483,6 @@ class MyDense(Layer):
 
     if self.fp8:
       outputs = fp8_matmul(self.kernel,
-                           self.weight1_fp8 if self.fp8 else None,
-                           self.weight1_t_fp8 if self.fp8 else None,
                            inputs,
                            self.fp8_meta)
     else:
