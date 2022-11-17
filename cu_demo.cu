@@ -89,6 +89,7 @@ void fp8_gemm(const void* A_ptr,
   const int m = transa ? A_dim0 : A_dim1;
   const int k = transa ? A_dim1 : A_dim0;
   const int n = transb ? B_dim1 : B_dim0;
+  printf("XXX m, k, n = %d, %d, %d\n", m, k, n);
 
   const size_t A_N = m * k;
   const size_t B_N = k * n;
@@ -100,6 +101,7 @@ void fp8_gemm(const void* A_ptr,
   fp32* D = nullptr;
   fp32* A_scale_inv = nullptr;
   fp32* B_scale_inv = nullptr;
+  fp32* bias_ptr = nullptr;
   int workspaceSize = 33'554'432;
   void* workspace = nullptr;
   checkCUDA(cudaMalloc((void**)&A, A_N * sizeof(AType)));
@@ -107,6 +109,7 @@ void fp8_gemm(const void* A_ptr,
   checkCUDA(cudaMalloc((void**)&D, D_N * sizeof(DType)));
   checkCUDA(cudaMalloc((void**)&A_scale_inv, 1 * sizeof(fp32)));
   checkCUDA(cudaMalloc((void**)&B_scale_inv, 1 * sizeof(fp32)));
+  // checkCUDA(cudaMalloc((void**)&bias_ptr, n * sizeof(bf16)));
   checkCUDA(cudaMalloc((void**)&workspace, workspaceSize));
   checkCUDA(cudaMemcpy(A, A_ptr, A_N * sizeof(AType),
                        cudaMemcpyHostToDevice));
@@ -136,11 +139,12 @@ void fp8_gemm(const void* A_ptr,
     printf("TT layout not allowed.\n");
     exit(0);
   }
+  printf("XXX lda, ldb, ldd = %d, %d, %d\n", lda, ldb, ldd);
 
   auto A_type = CUDA_R_8F_E4M3;
   auto B_type = CUDA_R_8F_E4M3;
   auto D_type = CUDA_R_32F;
-  auto bias_type = CUDA_R_32F;
+  auto bias_type = CUDA_R_16BF;
   cudaStream_t stream = 0;
 
   transformer_engine::cublas_gemm(A,
@@ -148,7 +152,7 @@ void fp8_gemm(const void* A_ptr,
                                   B,
                                   B_scale_inv,
                                   D,
-                                  /*bias_ptr=*/nullptr,
+                                  /*bias_ptr=*/bias_ptr,
                                   /*pre_gelu_out=*/nullptr,
                                   m, n, k,
                                   lda, ldb, ldd,
@@ -158,7 +162,7 @@ void fp8_gemm(const void* A_ptr,
                                   bias_type,
                                   (transa) ? CUBLAS_OP_T : CUBLAS_OP_N,
                                   (transb) ? CUBLAS_OP_T : CUBLAS_OP_N,
-                                  /*bias=*/false,
+                                  /*bias=*/bias_ptr != nullptr,
                                   /*gelu=*/false,
                                   /*grad=*/false,
                                   workspace,
@@ -171,6 +175,15 @@ void fp8_gemm(const void* A_ptr,
   checkCUDA(cudaMemcpy(D_ptr, D, D_N * sizeof(DType),
                        cudaMemcpyDeviceToHost));
   printf("XXX inside gemm end\n");
+
+  checkCUDA(cudaFree(A));
+  checkCUDA(cudaFree(B));
+  checkCUDA(cudaFree(D));
+  checkCUDA(cudaFree(A_scale_inv));
+  checkCUDA(cudaFree(B_scale_inv));
+  // checkCUDA(cudaFree(bias_ptr));
+  checkCUDA(cudaFree(workspace));
+  
 }
 
 }

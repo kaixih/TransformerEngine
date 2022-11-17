@@ -325,16 +325,16 @@ def fp8_matmul_wrapper(inp, weight, fp8_meta):
   D = tf.zeros(D_shape, dtype=tf.float32)
   D_cpu = np.copy(D).flatten()
 
-  nvlib.fp8_gemm(ctypes.c_void_p(A_cpu.ctypes.data),
-                 ctypes.c_void_p(A_scale_inv_cpu.ctypes.data),
-                 ctypes.c_void_p(B_cpu.ctypes.data),
+  nvlib.fp8_gemm(ctypes.c_void_p(B_cpu.ctypes.data),
                  ctypes.c_void_p(B_scale_inv_cpu.ctypes.data),
+                 ctypes.c_void_p(A_cpu.ctypes.data),
+                 ctypes.c_void_p(A_scale_inv_cpu.ctypes.data),
                  ctypes.c_void_p(D_cpu.ctypes.data),
                  ctypes.c_int(B.shape[0]),
                  ctypes.c_int(B.shape[1]),
                  ctypes.c_int(A.shape[0]),
                  ctypes.c_int(A.shape[1]),
-                 ctypes.c_bool(False),
+                 ctypes.c_bool(True),
                  ctypes.c_bool(False),
                  ctypes.c_bool(False),
                  ctypes.c_bool(False),
@@ -368,7 +368,7 @@ def gemm(
     print("XXX weight1_t_fp8 dtype:", weight1_t_fp8.dtype)
     print("XXX weight1_t_fp8 shape:", weight1_t_fp8.shape)
 
-    outputs = fp8_matmul_wrapper(x_fp8, weight1_fp8, fp8_meta)
+    outputs = fp8_matmul_wrapper(x_fp8, weight1_t_fp8, fp8_meta)
 
   return outputs
 
