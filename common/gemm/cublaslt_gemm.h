@@ -36,7 +36,6 @@ void cublas_gemm(void* A,
     if (use_fp8) {
       NVTE_CHECK(!gelu, "fp8 gemm + gelu fusion is unavailable right now!");
     }
-    printf("XXX inside cublas_gemm\n");
 
     float one = 1.0;
     float zero = 0.0;
@@ -100,7 +99,6 @@ void cublas_gemm(void* A,
                                                              &bias_type, sizeof(bias_type)));
         }
     }
-    printf("XXX inside cublas_gemm after fp8 branch\n");
 
     if (bias && gelu) {
         if (grad) {
@@ -140,26 +138,21 @@ void cublas_gemm(void* A,
                                                          CUBLASLT_MATMUL_DESC_EPILOGUE_AUX_LD,
                                                          &ld_gelumat, sizeof(ld_gelumat)));
     }
-    printf("XXX inside cublas_gemm after gelu bias branch\n");
 
     NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc,
                                                      CUBLASLT_MATMUL_DESC_EPILOGUE,
                                                      &epilogue, sizeof(epilogue)));
-    printf("XXX inside cublas_gemm after set attr\n");
 
     NVTE_CHECK_CUBLAS(cublasLtMatmulPreferenceCreate(&preference));
     NVTE_CHECK_CUBLAS(cublasLtMatmulPreferenceSetAttribute(
                             preference, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
                             &workspaceSize, sizeof(workspaceSize)));
-    printf("XXX inside cublas_gemm after preference\n");
 
     NVTE_CHECK_CUBLAS(cublasLtMatmulAlgoGetHeuristic(handle, operationDesc, Adesc, Bdesc, Ddesc,
                                                      Ddesc, preference, 1, &heuristicResult,
                                                      &returnedResults));
-    printf("XXX inside cublas_gemm after heur\n");
 
     if (returnedResults == 0) throw std::runtime_error("Unable to find any suitable algorithms");
-    printf("XXX inside cublas_gemm returnedResults \n");
 
     // D = alpha * (A * B) + beta * C
     NVTE_CHECK_CUBLAS(cublasLtMatmul(handle,

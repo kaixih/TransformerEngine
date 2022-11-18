@@ -3,7 +3,7 @@ import numpy as np
 import tensorflow as tf
 
 from contextlib import contextmanager
-from typing import Callable, List, Optional, Dict, Any, Tuple, Union
+from typing import Callable, Optional, Dict, Any, Tuple, Union
 
 from enum import Enum
 from typing import Literal, Optional, Union, Callable, NamedTuple
@@ -11,6 +11,7 @@ from pydantic.dataclasses import dataclass
 
 from keras import backend
 from tensorflow.keras.layers import Layer
+
 nvlib = ctypes.cdll.LoadLibrary("./cu_demo.so")
 
 _FP8_ENABLED = False
@@ -21,10 +22,9 @@ _FP8_AUTOCAST_COUNTER = 0
 _FP8_CURRENT_CONTEXT_ID = 0
 _FP8_AUTOCAST_DEPTH = 0
 _global_fp8_buffer = {}
-_amax_forward_global_reduce_func = None
+_amax_forward_global_reduce_func = lambda : None
 _buffer_delete_key_fwd = None
 _buffer_delete_key_bwd = None
-
 
 def is_fp8_enabled():
   return _FP8_ENABLED
@@ -71,60 +71,48 @@ def get_amax_buffer_key(fp8_meta: Dict[str, Any], forward: bool = True) -> str:
     return f"FWD_AMAX_{fp8_meta['autocast_id_fwd']}"
   return f"BWD_AMAX_{fp8_meta['autocast_id_bwd']}"
 
-def copy_amax_from_global_buffer(
-    fp8_meta: Dict[str, Any], forward: bool = True
-) -> None:
-    """Populate current amax with the correct location from buffer."""
-    fp8_meta_tensor_key = get_meta_tensor_key(forward=forward)
-    buffer_position_key = get_buffer_position_key(forward=forward)
-    if buffer_position_key not in fp8_meta:
-        return
-    amax_buffer_key = get_amax_buffer_key(fp8_meta, forward=forward)
-    #fp8_meta[fp8_meta_tensor_key]["amax_history"][0] = _global_fp8_buffer[amax_buffer_key][
-    #    fp8_meta[buffer_position_key]
-    #]
-    update_tensor = _global_fp8_buffer[amax_buffer_key][
-        fp8_meta[buffer_position_key]
-    ]
-    new_tensor = tf.tensor_scatter_nd_update(
-        fp8_meta[fp8_meta_tensor_key]["amax_history"], [[0]], [update_tensor])
-    fp8_meta[fp8_meta_tensor_key]["amax_history"] = new_tensor
+def copy_amax_from_global_buffer(fp8_meta: Dict[str, Any],
+                                 forward: bool = True) -> None:
+  fp8_meta_tensor_key = get_meta_tensor_key(forward=forward)
+  buffer_position_key = get_buffer_position_key(forward=forward)
+  if buffer_position_key not in fp8_meta:
+    return
+  amax_buffer_key = get_amax_buffer_key(fp8_meta, forward=forward)
+  update_tensor = _global_fp8_buffer[amax_buffer_key][
+      fp8_meta[buffer_position_key]
+  ]
+  new_tensor = tf.tensor_scatter_nd_update(
+      fp8_meta[fp8_meta_tensor_key]["amax_history"], [[0]], [update_tensor])
+  fp8_meta[fp8_meta_tensor_key]["amax_history"] = new_tensor
 
 def update_amax_history(amax_history: tf.Tensor) -> tf.Tensor:
   amax_history = tf.roll(amax_history, -1, 0)
   zeros = tf.zeros(shape=amax_history[0].shape)
   amax_history = tf.tensor_scatter_nd_update(amax_history, [[0]], [zeros])
-  print("XXX rolled history", amax_history)
   return amax_history
 
-def _default_get_amax(
-    amax_history: tf.Tensor,
-    amax_compute_algo: str,
-) -> Tuple[tf.Tensor, tf.Tensor]:
+def _default_get_amax(amax_history: tf.Tensor,
+                      amax_compute_algo: str) -> Tuple[tf.Tensor, tf.Tensor]:
   if amax_compute_algo == "max":
     amax = tf.reduce_max(amax_history, axis=0)
-    print("XXX amax (max)", amax)
-  else:  # amax_compute_algo == "most_recent"
+  else:
+    assert amax_compute_algo == "most_recent"
     amax = amax_history[0]
-    print("XXX amax (most_recent)", amax)
 
   amax_history = update_amax_history(amax_history)
   return amax_history, amax
 
-def _default_sf_compute(
-    amax: tf.Tensor,
-    scale: tf.Tensor,
-    fp8_max: float,
-    margin: int,
-) -> tf.Tensor:
-    """Default function to convert amax to scaling factor."""
-    exp = tf.math.floor(tf.experimental.numpy.log2(fp8_max / amax)) - margin
-    sf = tf.math.round(tf.math.pow(2, tf.math.abs(exp)))
-    sf = tf.where(amax > 0.0, sf, scale)
-    sf = tf.where(tf.math.is_inf(amax), sf, scale)
-    sf = tf.where(exp < 0, 1 / sf, sf)
+def _default_sf_compute(amax: tf.Tensor,
+                        scale: tf.Tensor,
+                        fp8_max: float,
+                        margin: int) -> tf.Tensor:
+  exp = tf.math.floor(tf.experimental.numpy.log2(fp8_max / amax)) - margin
+  sf = tf.math.round(tf.math.pow(2, tf.math.abs(exp)))
+  sf = tf.where(amax > 0.0, sf, scale)
+  sf = tf.where(tf.math.is_inf(amax), sf, scale)
+  sf = tf.where(exp < 0, 1 / sf, sf)
 
-    return sf
+  return sf
 
 def fused_amax_and_scale_update(
     amax_history: tf.Tensor,
@@ -155,6 +143,8 @@ def amax_and_scale_update(
   sf_compute = fp8_meta["recipe"].scaling_factor_compute_algo
   fp8_meta_tensor_key = "scaling_fwd" if fwd_update else "scaling_bwd"
   fp8_max_key = "fp8_max_fwd" if fwd_update else "fp8_max_bwd"
+  print("XXX amax_history", fp8_meta_tensor_key,
+        fp8_meta[fp8_meta_tensor_key]["amax_history"])
 
   if not callable(amax_compute) and sf_compute is None:
     (
@@ -179,7 +169,10 @@ def set_amax_buffer_key_deletion(
   else:
     _buffer_delete_key_bwd = get_amax_buffer_key(fp8_meta, forward=forward)
 
-def add_amax_to_global_buffer(fp8_meta: Dict[str, Any], forward: bool = True) -> None:
+def add_amax_to_global_buffer(
+    fp8_meta: Dict[str, Any],
+    forward: bool = True
+) -> None:
   """Append 1D tensor `amax` to global buffer."""
   global _global_fp8_buffer
   buffer_key = get_amax_buffer_key(fp8_meta, forward=forward)
@@ -187,17 +180,19 @@ def add_amax_to_global_buffer(fp8_meta: Dict[str, Any], forward: bool = True) ->
   buffer_position_key = get_buffer_position_key(forward=forward)
 
   if buffer_key not in _global_fp8_buffer:
-    _global_fp8_buffer[buffer_key] = [fp8_meta[fp8_meta_tensor_key]["amax_history"][0]]
+    _global_fp8_buffer[buffer_key] = \
+        [fp8_meta[fp8_meta_tensor_key]["amax_history"][0]]
   else:
     _global_fp8_buffer[buffer_key].append(
         fp8_meta[fp8_meta_tensor_key]["amax_history"][0]
     )
-  print("XXX _global_fp8_buffer", _global_fp8_buffer)
 
   if buffer_position_key not in fp8_meta:
     fp8_meta[buffer_position_key] = len(_global_fp8_buffer[buffer_key]) - 1
 
-def delete_key_from_amax_buffer(forward: bool = True) -> None:
+def delete_key_from_amax_buffer(
+    forward: bool = True
+) -> None:
   global _global_fp8_buffer, _buffer_delete_key_fwd, _buffer_delete_key_bwd
   if forward:
     if (
@@ -232,12 +227,15 @@ class DelayedScaling:
   interval: int = 1
   fp8_format: Format = Format.HYBRID
   amax_history_len: int = 1
-  amax_compute_algo: Union[Literal["max", "most_recent"], Callable] = "most_recent"
-  override_linear_precision: _OverrideLinearPrecision = _OverrideLinearPrecision()
+  amax_compute_algo: Union[Literal["max", "most_recent"], Callable] = \
+      "most_recent"
+  override_linear_precision: _OverrideLinearPrecision = \
+      _OverrideLinearPrecision()
   scaling_factor_compute_algo: Optional[Callable] = None
 
   def __post_init__(self) -> None:
-    assert self.fp8_format != Format.E5M2, "Pure E5M2 training is not supported."
+    assert self.fp8_format != Format.E5M2, \
+           "Pure E5M2 training is not supported."
     assert self.override_linear_precision in (
         (False, False, False),
         (False, False, True),
@@ -282,7 +280,6 @@ def fp8_autocast(
     if _FP8_AUTOCAST_DEPTH == 0:
       if callable(_amax_forward_global_reduce_func):
         _amax_forward_global_reduce_func()
-      print("XXX finally called, delete")
       delete_key_from_amax_buffer(forward=True)
 
 def cast_to_fp8_wrapper(inp, fp8_meta, amax_index, fwd, dtype):
@@ -368,9 +365,10 @@ def fp8_matmul_wrapper(inp, weight, fp8_meta, mode, A_dtype, B_dtype):
 
 
 class MyDense(Layer):
-  def __init__(self, units, **kwargs):
+  def __init__(self, units, kernel_initializer, **kwargs):
     super().__init__(**kwargs)
     self.units = int(units) if not isinstance(units, int) else units
+    self.kernel_initializer = kernel_initializer
 
     # fp8 related
     self.fp8 = False
@@ -388,6 +386,7 @@ class MyDense(Layer):
             shape=[last_dim, self.units],
             dtype=self.dtype,
             trainable=True,
+            initializer=self.kernel_initializer,
         )
 
     # fp8 related
@@ -415,13 +414,12 @@ class MyDense(Layer):
     """Init scales and amaxes."""
     # Checkpoint loaded
     if self.fp8_meta_tensors_initialized:
-        return
+      return
 
     self.set_meta_tensor(True)
     self.set_meta_tensor(False)
 
   def fp8_init(self, num_gemms=1):
-    print("XXX is_fp8_enabled", is_fp8_enabled())
     if not is_fp8_enabled():
       self.fp8 = False
       return
@@ -436,8 +434,10 @@ class MyDense(Layer):
     self.fp8_meta["num_gemms"] = num_gemms
 
     # Set FP8_MAX per tensor according to recipe
-    self.fp8_meta["fp8_max_fwd"] = self.fp8_meta["recipe"].fp8_format.value.max_fwd
-    self.fp8_meta["fp8_max_bwd"] = self.fp8_meta["recipe"].fp8_format.value.max_bwd
+    self.fp8_meta["fp8_max_fwd"] = \
+        self.fp8_meta["recipe"].fp8_format.value.max_fwd
+    self.fp8_meta["fp8_max_bwd"] = \
+        self.fp8_meta["recipe"].fp8_format.value.max_bwd
 
     # Allocate scales and amaxes
     self.init_fp8_meta_tensors()
@@ -456,30 +456,30 @@ class MyDense(Layer):
   def pre_forward(self, inputs, training, num_gemms=1):
     self.fp8_init(num_gemms=num_gemms)
 
-    if self.fp8_meta.get("update_amax_and_scale_fwd", False):
-      # Previous iteration was grad_enabled
-      #copy_amax_from_global_buffer(self.fp8_meta, forward=True)
-      amax_and_scale_update(self.fp8_meta, True)
-      set_amax_buffer_key_deletion(self.fp8_meta, forward=True)
+    if self.fp8:
+      if self.fp8_meta.get("update_amax_and_scale_fwd", False):
+        # Previous iteration was grad_enabled
+        #copy_amax_from_global_buffer(self.fp8_meta, forward=True)
+        amax_and_scale_update(self.fp8_meta, True)
+        set_amax_buffer_key_deletion(self.fp8_meta, forward=True)
 
-    print("XXX training", training)
-    if self.fp8 and training:
-      self.fp8_meta["first_module"] = is_first_fp8_module()
+      if training:
+        self.fp8_meta["first_module"] = is_first_fp8_module()
 
-      if self.fp8_meta["first_module"]:
-        self.fp8_meta["autocast_id_fwd"] = new_fp8_context_id()
-        set_fp8_context_id(self.fp8_meta["autocast_id_fwd"])
+        if self.fp8_meta["first_module"]:
+          self.fp8_meta["autocast_id_fwd"] = new_fp8_context_id()
+          set_fp8_context_id(self.fp8_meta["autocast_id_fwd"])
+        else:
+          self.fp8_meta["autocast_id_fwd"] = get_fp8_context_id()
+
+        #add_amax_to_global_buffer(self.fp8_meta, forward=True)
+        self.fp8_meta["update_amax_and_scale_fwd"] = True
+
+        # Create an empty tensor as a placeholder for the backprop to correctly
+        # know how many tensors to autograd.
+        self.fp8_meta["autocast_id_bwd"] = -1
       else:
-        self.fp8_meta["autocast_id_fwd"] = get_fp8_context_id()
-
-      #add_amax_to_global_buffer(self.fp8_meta, forward=True)
-      self.fp8_meta["update_amax_and_scale_fwd"] = True
-
-      # Create an empty tensor as a placeholder for the backprop to correctly
-      # know how many tensors to autograd.
-      self.fp8_meta["autocast_id_bwd"] = -1
-    else:
-      self.fp8_meta["update_amax_and_scale_fwd"] = False
+        self.fp8_meta["update_amax_and_scale_fwd"] = False
 
   def pre_backward(self, fp8_meta):
     # From previous iteration
@@ -508,53 +508,29 @@ class MyDense(Layer):
 
     x_fp8 = cast_to_fp8_wrapper(inp, fp8_meta, 0, True, fp8_dtype_forward)
     x_t_fp8 = tf.transpose(x_fp8)
-    weight_fp8 = cast_to_fp8_wrapper(weight, fp8_meta, 1, True, fp8_dtype_forward)
+    weight_fp8 = cast_to_fp8_wrapper(weight, fp8_meta, 1, True,
+                                     fp8_dtype_forward)
     weight_t_fp8 = tf.transpose(weight_fp8)
-    # Store the intermediate results to be used in the backprop.
-    #ctx = {}
-    #ctx['weight_fp8'] = weight_fp8
-    #ctx['weight_t_fp8'] = weight_t_fp8
-  
-    print("XXX scale_inv:", fp8_meta["scaling_fwd"]["scale_inv"])
-    print("XXX amax:", fp8_meta["scaling_fwd"]["amax_history"])
-    print("XXX x_fp8 dtype:", x_fp8.dtype)
-    print("XXX x_fp8 shape:", x_fp8.shape)
-    print("XXX weight_fp8 dtype:", weight_fp8.dtype)
-    print("XXX weight_fp8 shape:", weight_fp8.shape)
-    print("XXX weight_t_fp8 dtype:", weight_t_fp8.dtype)
-    print("XXX weight_t_fp8 shape:", weight_t_fp8.shape)
   
     outputs = fp8_matmul_wrapper(x_fp8, weight_t_fp8, fp8_meta, 'fwd',
                                  fp8_dtype_forward, fp8_dtype_forward)
 
     def grad_fn(upstream, variables):
       self.pre_backward(self.fp8_meta)
-      grad_fp8 = cast_to_fp8_wrapper(upstream, fp8_meta, 0, False, fp8_dtype_backward)
+      grad_fp8 = cast_to_fp8_wrapper(upstream, fp8_meta, 0, False,
+                                     fp8_dtype_backward)
       grad_t_fp8 = tf.transpose(grad_fp8)
 
       grad_x = fp8_matmul_wrapper(grad_fp8, weight_fp8, fp8_meta, 'bwd_input',
                                   fp8_dtype_backward, fp8_dtype_forward)
-      print("XXX grad_t_fp8 shape", grad_t_fp8.shape)
-      print("XXX x_t_fp8 shape", x_t_fp8.shape)
       grad_weight = fp8_matmul_wrapper(x_t_fp8, grad_t_fp8, fp8_meta,
                                        'bwd_weight',
                                        fp8_dtype_forward, fp8_dtype_backward)
-
-      print("XXX bwd scale_inv:", fp8_meta["scaling_bwd"]["scale_inv"])
-      print("XXX bwd amax:", fp8_meta["scaling_bwd"]["amax_history"])
-      print("XXX bwd grad_fp8 dtype:", grad_fp8.dtype)
-      print("XXX bwd grad_fp8 shape:", grad_fp8.shape)
-      print("XXX bwd grad_x dtype:", grad_x.dtype)
-      print("XXX bwd grad_x shape:", grad_x.shape)
-      print("XXX bwd grad_weight dtype:", grad_weight.dtype)
-      print("XXX bwd grad_weight shape:", grad_weight.shape)
 
       # The fp8_meta contains 16 tensors which don't need grads.
       grad_inputs = [grad_x]
       grad_inputs.extend([None] * 15)
       grad_vars = []
-      print("XXX grad_fn", len(variables))
-      print("XXX fp8_meta", fp8_meta)
       grad_vars.append(grad_weight)
       return grad_inputs, grad_vars
   

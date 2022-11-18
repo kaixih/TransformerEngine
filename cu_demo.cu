@@ -38,10 +38,8 @@ extern "C" {
 void cast_to_fp8(const void* input_ptr, const void* scale_ptr, void *amax_ptr,
                  void *scale_inv_ptr, void* output_ptr, size_t dim0,
                  size_t dim1, int dtype) {
-  printf("XXX inside cast_to_fp8 beginning\n");
 
   const size_t N = dim0 * dim1;
-  printf("XXX inside cast_to_fp8 N=%ld\n", N);
   using IType = float;
   using OType = fp8e4m3;
   IType* input = nullptr;
@@ -58,7 +56,6 @@ void cast_to_fp8(const void* input_ptr, const void* scale_ptr, void *amax_ptr,
                        cudaMemcpyHostToDevice));
   checkCUDA(cudaMemcpy(scale, scale_ptr, 1 * sizeof(fp32),
                        cudaMemcpyHostToDevice));
-  printf("XXX inside cast_to_fp8 after allocation\n");
 
 
   constexpr int nvec = 32 / sizeof(IType);
@@ -81,7 +78,6 @@ void cast_to_fp8(const void* input_ptr, const void* scale_ptr, void *amax_ptr,
                        cudaMemcpyDeviceToHost));
   checkCUDA(cudaMemcpy(amax_ptr, amax, 1 * sizeof(fp32),
                        cudaMemcpyDeviceToHost));
-  printf("XXX inside cast_to_fp8\n");
 }
 
 void fp8_gemm(const void* A_ptr,
@@ -99,7 +95,6 @@ void fp8_gemm(const void* A_ptr,
   const int m = transa ? A_dim0 : A_dim1;
   const int k = transa ? A_dim1 : A_dim0;
   const int n = transb ? B_dim1 : B_dim0;
-  printf("XXX m, k, n = %d, %d, %d\n", m, k, n);
 
   const size_t A_N = m * k;
   const size_t B_N = k * n;
@@ -129,7 +124,6 @@ void fp8_gemm(const void* A_ptr,
                        cudaMemcpyHostToDevice));
   checkCUDA(cudaMemcpy(B_scale_inv, B_scale_inverse_ptr, 1 * sizeof(fp32),
                        cudaMemcpyHostToDevice));
-  printf("XXX inside gemm after allocation\n");
 
 
   int lda, ldb, ldd;
@@ -149,7 +143,6 @@ void fp8_gemm(const void* A_ptr,
     printf("TT layout not allowed.\n");
     exit(0);
   }
-  printf("XXX lda, ldb, ldd = %d, %d, %d\n", lda, ldb, ldd);
 
   auto A_type = CUDA_R_8F_E4M3;
   auto B_type = CUDA_R_8F_E4M3;
@@ -187,7 +180,6 @@ void fp8_gemm(const void* A_ptr,
 
   checkCUDA(cudaMemcpy(D_ptr, D, D_N * sizeof(DType),
                        cudaMemcpyDeviceToHost));
-  printf("XXX inside gemm end\n");
 
   checkCUDA(cudaFree(A));
   checkCUDA(cudaFree(B));
