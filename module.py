@@ -275,15 +275,16 @@ def fp8_autocast(
       print("XXX finally called, delete")
       delete_key_from_amax_buffer(forward=True)
 
-def cast_to_fp8_wrapper(inp, fp8_meta, amax_index):
+def cast_to_fp8_wrapper(inp, fp8_meta, amax_index, fwd):
+  scaling_key = "scaling_fwd" if fwd else "scaling_bwd"
   inp_shape = inp.shape
   x = inp
   x_cpu = np.copy(x).flatten()
-  scale = fp8_meta["scaling_fwd"]["scale"][amax_index]
+  scale = fp8_meta[scaling_key]["scale"][amax_index]
   scale_cpu = np.copy(scale).flatten()
-  amax = fp8_meta["scaling_fwd"]["amax_history"][0][amax_index]
+  amax = fp8_meta[scaling_key]["amax_history"][0][amax_index]
   amax_cpu = np.copy(amax).flatten()
-  scale_inv = fp8_meta["scaling_fwd"]["scale_inv"][amax_index]
+  scale_inv = fp8_meta[scaling_key]["scale_inv"][amax_index]
   scale_inv_cpu = np.copy(scale_inv).flatten()
   x_fp8 = tf.zeros(inp.shape, dtype=tf.int8)
   x_fp8_cpu = np.copy(x_fp8).flatten()
@@ -300,25 +301,33 @@ def cast_to_fp8_wrapper(inp, fp8_meta, amax_index):
 
   scale_inv = tf.convert_to_tensor(scale_inv_cpu)
   new_tensor = tf.tensor_scatter_nd_update(
-      fp8_meta["scaling_fwd"]["scale_inv"], [[amax_index]], scale_inv)
-  fp8_meta["scaling_fwd"]["scale_inv"] = new_tensor
+      fp8_meta[scaling_key]["scale_inv"], [[amax_index]], scale_inv)
+  fp8_meta[scaling_key]["scale_inv"] = new_tensor
 
   amax = tf.convert_to_tensor(amax_cpu)
   new_tensor = tf.tensor_scatter_nd_update(
-      fp8_meta["scaling_fwd"]["amax_history"], [[0, amax_index]], amax)
-  fp8_meta["scaling_fwd"]["amax_history"] = new_tensor
+      fp8_meta[scaling_key]["amax_history"], [[0, amax_index]], amax)
+  fp8_meta[scaling_key]["amax_history"] = new_tensor
   return x_fp8
 
 
-def fp8_matmul_wrapper(inp, weight, fp8_meta):
+def fp8_matmul_wrapper(inp, weight, fp8_meta, mode):
   A = inp
   A_cpu = np.copy(A).flatten()
-  A_scale_inv = fp8_meta["scaling_fwd"]["scale_inv"][0]
+  if mode == 'fwd':
+    A_scale_inv = fp8_meta["scaling_fwd"]["scale_inv"][0]
+    B_scale_inv = fp8_meta["scaling_fwd"]["scale_inv"][1]
+  elif mode == 'bwd_input':
+    A_scale_inv = fp8_meta["scaling_bwd"]["scale_inv"][0]
+    B_scale_inv = fp8_meta["scaling_fwd"]["scale_inv"][1]
+  elif mode == 'bwd_weight':
+    A_scale_inv = fp8_meta["scaling_fwd"]["scale_inv"][0]
+    B_scale_inv = fp8_meta["scaling_bwd"]["scale_inv"][0]
+
   A_scale_inv_cpu = np.copy(A_scale_inv).flatten()
 
   B = weight
   B_cpu = np.copy(B).flatten()
-  B_scale_inv = fp8_meta["scaling_fwd"]["scale_inv"][1]
   B_scale_inv_cpu = np.copy(B_scale_inv).flatten()
 
   # weight is actually transposed weight
@@ -344,27 +353,6 @@ def fp8_matmul_wrapper(inp, weight, fp8_meta):
   D = tf.convert_to_tensor(D_cpu.reshape(D_shape))
   return D
 
-
-def fp8_matmul(
-    weight: tf.Tensor,
-    inp: tf.Tensor,
-    fp8_meta: Dict[str, Any]) -> tf.Tensor:
-  x_fp8 = cast_to_fp8_wrapper(inp, fp8_meta, 0)
-  weight1_fp8 = cast_to_fp8_wrapper(weight, fp8_meta, 1)
-  weight1_t_fp8 = tf.transpose(weight1_fp8)
-
-  print("XXX scale_inv:", fp8_meta["scaling_fwd"]["scale_inv"])
-  print("XXX amax:", fp8_meta["scaling_fwd"]["amax_history"])
-  print("XXX x_fp8 dtype:", x_fp8.dtype)
-  print("XXX x_fp8 shape:", x_fp8.shape)
-  print("XXX weight1_fp8 dtype:", weight1_fp8.dtype)
-  print("XXX weight1_fp8 shape:", weight1_fp8.shape)
-  print("XXX weight1_t_fp8 dtype:", weight1_t_fp8.dtype)
-  print("XXX weight1_t_fp8 shape:", weight1_t_fp8.shape)
-
-  outputs = fp8_matmul_wrapper(x_fp8, weight1_t_fp8, fp8_meta)
-
-  return outputs
 
 class MyDense(Layer):
   def __init__(self, units, **kwargs):
@@ -473,8 +461,83 @@ class MyDense(Layer):
 
       #add_amax_to_global_buffer(self.fp8_meta, forward=True)
       self.fp8_meta["update_amax_and_scale_fwd"] = True
+
+      # Create an empty tensor as a placeholder for the backprop to correctly
+      # know how many tensors to autograd.
+      self.fp8_meta["autocast_id_bwd"] = -1
     else:
       self.fp8_meta["update_amax_and_scale_fwd"] = False
+
+  def pre_backward(self, fp8_meta):
+    # From previous iteration
+    #copy_amax_from_global_buffer(fp8_meta, forward=False)
+    amax_and_scale_update(fp8_meta, False)
+    set_amax_buffer_key_deletion(fp8_meta, forward=False)
+
+    # Get new backward key.
+    #if "autocast_id_bwd" not in fp8_meta:
+    if fp8_meta["autocast_id_bwd"] == -1:
+      fp8_meta["autocast_id_bwd"] = fp8_meta["autocast_id_fwd"]
+    else:
+      fp8_meta["autocast_id_bwd"] += 1
+
+    #add_amax_to_global_buffer(fp8_meta, forward=False)
+
+  @tf.custom_gradient
+  def fp8_matmul(
+      self,
+      inp: tf.Tensor,
+      fp8_meta: Dict[str, Any]) -> tf.Tensor:
+    weight = self.kernel
+    x_fp8 = cast_to_fp8_wrapper(inp, fp8_meta, 0, True)
+    x_t_fp8 = tf.transpose(x_fp8)
+    weight_fp8 = cast_to_fp8_wrapper(weight, fp8_meta, 1, True)
+    weight_t_fp8 = tf.transpose(weight_fp8)
+    # Store the intermediate results to be used in the backprop.
+    #ctx = {}
+    #ctx['weight_fp8'] = weight_fp8
+    #ctx['weight_t_fp8'] = weight_t_fp8
+  
+    print("XXX scale_inv:", fp8_meta["scaling_fwd"]["scale_inv"])
+    print("XXX amax:", fp8_meta["scaling_fwd"]["amax_history"])
+    print("XXX x_fp8 dtype:", x_fp8.dtype)
+    print("XXX x_fp8 shape:", x_fp8.shape)
+    print("XXX weight_fp8 dtype:", weight_fp8.dtype)
+    print("XXX weight_fp8 shape:", weight_fp8.shape)
+    print("XXX weight_t_fp8 dtype:", weight_t_fp8.dtype)
+    print("XXX weight_t_fp8 shape:", weight_t_fp8.shape)
+  
+    outputs = fp8_matmul_wrapper(x_fp8, weight_t_fp8, fp8_meta, 'fwd')
+
+    def grad_fn(upstream, variables):
+      self.pre_backward(self.fp8_meta)
+      grad_fp8 = cast_to_fp8_wrapper(upstream, fp8_meta, 0, False)
+      grad_t_fp8 = tf.transpose(grad_fp8)
+
+      grad_x = fp8_matmul_wrapper(grad_fp8, weight_fp8, fp8_meta, 'bwd_input')
+      print("XXX grad_t_fp8 shape", grad_t_fp8.shape)
+      print("XXX x_t_fp8 shape", x_t_fp8.shape)
+      grad_weight = fp8_matmul_wrapper(x_t_fp8, grad_t_fp8, fp8_meta, 'bwd_weight')
+
+      print("XXX bwd scale_inv:", fp8_meta["scaling_bwd"]["scale_inv"])
+      print("XXX bwd amax:", fp8_meta["scaling_bwd"]["amax_history"])
+      print("XXX bwd grad_fp8 dtype:", grad_fp8.dtype)
+      print("XXX bwd grad_fp8 shape:", grad_fp8.shape)
+      print("XXX bwd grad_x dtype:", grad_x.dtype)
+      print("XXX bwd grad_x shape:", grad_x.shape)
+      print("XXX bwd grad_weight dtype:", grad_weight.dtype)
+      print("XXX bwd grad_weight shape:", grad_weight.shape)
+
+      # The fp8_meta contains 13 tensors which don't need grads.
+      grad_inputs = [grad_x, None, None, None, None, None, None, None, None,
+                     None, None, None, None, None]
+      grad_vars = []
+      print("XXX grad_fn", len(variables))
+      print("XXX fp8_meta", fp8_meta)
+      grad_vars.append(grad_weight)
+      return grad_inputs, grad_vars
+  
+    return outputs, grad_fn
 
 
   def call(self, inputs, training=None):
@@ -482,10 +545,14 @@ class MyDense(Layer):
     self.pre_forward(inputs, training)
 
     if self.fp8:
-      outputs = fp8_matmul(self.kernel,
-                           inputs,
-                           self.fp8_meta)
+      # Recipe is an object of DelayedScaling which is not supported when TF
+      # does the autograd. Since it is not used in the computation, we
+      # temporarily remove it.
+      recipe_copy = self.fp8_meta['recipe']
+      del self.fp8_meta['recipe']
+      outputs = self.fp8_matmul(inputs, self.fp8_meta)
+      self.fp8_meta['recipe'] = recipe_copy
     else:
-      outputs = tf.matmul(a=inp, b=weight)
+      outputs = tf.matmul(a=inputs, b=self.kernel)
 
     return outputs
