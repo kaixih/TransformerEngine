@@ -4,7 +4,7 @@ import module as te
 #from layer_demo import MyDense
 
 my_dense = MyDense(16)
-fp8_recipe = DelayedScaling(margin=0, interval=1, fp8_format=Format.E4M3,
+fp8_recipe = DelayedScaling(margin=0, interval=1, fp8_format=Format.HYBRID,
                             amax_compute_algo='max', amax_history_len=3)
 
 for i in range(4):

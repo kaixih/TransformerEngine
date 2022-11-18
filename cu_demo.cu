@@ -37,7 +37,7 @@ extern "C" {
 
 void cast_to_fp8(const void* input_ptr, const void* scale_ptr, void *amax_ptr,
                  void *scale_inv_ptr, void* output_ptr, size_t dim0,
-                 size_t dim1) {
+                 size_t dim1, int dtype) {
   printf("XXX inside cast_to_fp8 beginning\n");
 
   const size_t N = dim0 * dim1;
@@ -63,9 +63,17 @@ void cast_to_fp8(const void* input_ptr, const void* scale_ptr, void *amax_ptr,
 
   constexpr int nvec = 32 / sizeof(IType);
   cudaStream_t stream = 0;
-  transformer_engine::VectorizedUnaryKernelLauncher<
-      nvec, detail::Empty, detail::identity>(input, output, scale, scale_inv,
-                                             amax, N, {}, stream);
+  if (dtype == 0) {
+    transformer_engine::VectorizedUnaryKernelLauncher<
+        nvec, detail::Empty, detail::identity>(input, output, scale, scale_inv,
+                                               amax, N, {}, stream);
+  } else {
+
+    fp8e5m2* output_cast = reinterpret_cast<fp8e5m2*>(output);
+    transformer_engine::VectorizedUnaryKernelLauncher<
+        nvec, detail::Empty, detail::identity>(
+            input, output_cast, scale, scale_inv, amax, N, {}, stream);
+  }
 
   checkCUDA(cudaMemcpy(output_ptr, output, N * sizeof(OType),
                        cudaMemcpyDeviceToHost));
@@ -78,8 +86,10 @@ void cast_to_fp8(const void* input_ptr, const void* scale_ptr, void *amax_ptr,
 
 void fp8_gemm(const void* A_ptr,
               const void* A_scale_inverse_ptr,
+              int A_dtype,
               const void* B_ptr,
               const void* B_scale_inverse_ptr,
+              int B_dtype,
               void* D_ptr,
               int A_dim0, int A_dim1,
               int B_dim0, int B_dim1,
@@ -143,6 +153,9 @@ void fp8_gemm(const void* A_ptr,
 
   auto A_type = CUDA_R_8F_E4M3;
   auto B_type = CUDA_R_8F_E4M3;
+  if (A_dtype != 0 ) A_type = CUDA_R_8F_E5M2;
+  if (B_dtype != 0 ) B_type = CUDA_R_8F_E5M2;
+
   auto D_type = CUDA_R_32F;
   auto bias_type = CUDA_R_16BF;
   cudaStream_t stream = 0;

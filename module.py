@@ -25,6 +25,7 @@ _amax_forward_global_reduce_func = None
 _buffer_delete_key_fwd = None
 _buffer_delete_key_bwd = None
 
+
 def is_fp8_enabled():
   return _FP8_ENABLED
 
@@ -245,6 +246,15 @@ class DelayedScaling:
 def get_default_fp8_recipe():
   return DelayedScaling()
 
+def get_fp8_te_dtype(
+  fp8_recipe: DelayedScaling, fprop_tensor: bool = True):
+  """Get fp8 data type according to recipe and tensor"""
+  if fp8_recipe.fp8_format == Format.E4M3 or (
+      fp8_recipe.fp8_format == Format.HYBRID and fprop_tensor
+  ):
+    return 0
+  return 1
+
 @contextmanager
 def fp8_autocast(
     enabled: bool = False,
@@ -275,7 +285,7 @@ def fp8_autocast(
       print("XXX finally called, delete")
       delete_key_from_amax_buffer(forward=True)
 
-def cast_to_fp8_wrapper(inp, fp8_meta, amax_index, fwd):
+def cast_to_fp8_wrapper(inp, fp8_meta, amax_index, fwd, dtype):
   scaling_key = "scaling_fwd" if fwd else "scaling_bwd"
   inp_shape = inp.shape
   x = inp
@@ -295,7 +305,8 @@ def cast_to_fp8_wrapper(inp, fp8_meta, amax_index, fwd):
                     ctypes.c_void_p(scale_inv_cpu.ctypes.data),
                     ctypes.c_void_p(x_fp8_cpu.ctypes.data),
                     ctypes.c_size_t(x.shape[0]),
-                    ctypes.c_size_t(x.shape[1]))
+                    ctypes.c_size_t(x.shape[1]),
+                    ctypes.c_int(dtype))
 
   x_fp8 = tf.convert_to_tensor(x_fp8_cpu.reshape(inp_shape))
 
@@ -311,7 +322,7 @@ def cast_to_fp8_wrapper(inp, fp8_meta, amax_index, fwd):
   return x_fp8
 
 
-def fp8_matmul_wrapper(inp, weight, fp8_meta, mode):
+def fp8_matmul_wrapper(inp, weight, fp8_meta, mode, A_dtype, B_dtype):
   A = inp
   A_cpu = np.copy(A).flatten()
   if mode == 'fwd':
@@ -337,8 +348,10 @@ def fp8_matmul_wrapper(inp, weight, fp8_meta, mode):
 
   nvlib.fp8_gemm(ctypes.c_void_p(B_cpu.ctypes.data),
                  ctypes.c_void_p(B_scale_inv_cpu.ctypes.data),
+                 ctypes.c_int(B_dtype),
                  ctypes.c_void_p(A_cpu.ctypes.data),
                  ctypes.c_void_p(A_scale_inv_cpu.ctypes.data),
+                 ctypes.c_int(A_dtype),
                  ctypes.c_void_p(D_cpu.ctypes.data),
                  ctypes.c_int(B.shape[0]),
                  ctypes.c_int(B.shape[1]),
@@ -487,11 +500,15 @@ class MyDense(Layer):
   def fp8_matmul(
       self,
       inp: tf.Tensor,
-      fp8_meta: Dict[str, Any]) -> tf.Tensor:
+      fp8_meta: Dict[str, Any],
+      fp8_dtype_forward: bool,
+      fp8_dtype_backward: bool,
+      ) -> tf.Tensor:
     weight = self.kernel
-    x_fp8 = cast_to_fp8_wrapper(inp, fp8_meta, 0, True)
+
+    x_fp8 = cast_to_fp8_wrapper(inp, fp8_meta, 0, True, fp8_dtype_forward)
     x_t_fp8 = tf.transpose(x_fp8)
-    weight_fp8 = cast_to_fp8_wrapper(weight, fp8_meta, 1, True)
+    weight_fp8 = cast_to_fp8_wrapper(weight, fp8_meta, 1, True, fp8_dtype_forward)
     weight_t_fp8 = tf.transpose(weight_fp8)
     # Store the intermediate results to be used in the backprop.
     #ctx = {}
@@ -507,17 +524,21 @@ class MyDense(Layer):
     print("XXX weight_t_fp8 dtype:", weight_t_fp8.dtype)
     print("XXX weight_t_fp8 shape:", weight_t_fp8.shape)
   
-    outputs = fp8_matmul_wrapper(x_fp8, weight_t_fp8, fp8_meta, 'fwd')
+    outputs = fp8_matmul_wrapper(x_fp8, weight_t_fp8, fp8_meta, 'fwd',
+                                 fp8_dtype_forward, fp8_dtype_forward)
 
     def grad_fn(upstream, variables):
       self.pre_backward(self.fp8_meta)
-      grad_fp8 = cast_to_fp8_wrapper(upstream, fp8_meta, 0, False)
+      grad_fp8 = cast_to_fp8_wrapper(upstream, fp8_meta, 0, False, fp8_dtype_backward)
       grad_t_fp8 = tf.transpose(grad_fp8)
 
-      grad_x = fp8_matmul_wrapper(grad_fp8, weight_fp8, fp8_meta, 'bwd_input')
+      grad_x = fp8_matmul_wrapper(grad_fp8, weight_fp8, fp8_meta, 'bwd_input',
+                                  fp8_dtype_backward, fp8_dtype_forward)
       print("XXX grad_t_fp8 shape", grad_t_fp8.shape)
       print("XXX x_t_fp8 shape", x_t_fp8.shape)
-      grad_weight = fp8_matmul_wrapper(x_t_fp8, grad_t_fp8, fp8_meta, 'bwd_weight')
+      grad_weight = fp8_matmul_wrapper(x_t_fp8, grad_t_fp8, fp8_meta,
+                                       'bwd_weight',
+                                       fp8_dtype_forward, fp8_dtype_backward)
 
       print("XXX bwd scale_inv:", fp8_meta["scaling_bwd"]["scale_inv"])
       print("XXX bwd amax:", fp8_meta["scaling_bwd"]["amax_history"])
@@ -528,9 +549,9 @@ class MyDense(Layer):
       print("XXX bwd grad_weight dtype:", grad_weight.dtype)
       print("XXX bwd grad_weight shape:", grad_weight.shape)
 
-      # The fp8_meta contains 13 tensors which don't need grads.
-      grad_inputs = [grad_x, None, None, None, None, None, None, None, None,
-                     None, None, None, None, None]
+      # The fp8_meta contains 16 tensors which don't need grads.
+      grad_inputs = [grad_x]
+      grad_inputs.extend([None] * 15)
       grad_vars = []
       print("XXX grad_fn", len(variables))
       print("XXX fp8_meta", fp8_meta)
@@ -549,8 +570,13 @@ class MyDense(Layer):
       # does the autograd. Since it is not used in the computation, we
       # temporarily remove it.
       recipe_copy = self.fp8_meta['recipe']
+      fp8_dtype_forward = get_fp8_te_dtype(self.fp8_meta["recipe"],
+                                           fprop_tensor=True)
+      fp8_dtype_backward = get_fp8_te_dtype(self.fp8_meta["recipe"],
+                                            fprop_tensor=False)
       del self.fp8_meta['recipe']
-      outputs = self.fp8_matmul(inputs, self.fp8_meta)
+      outputs = self.fp8_matmul(inputs, self.fp8_meta, fp8_dtype_forward,
+                                fp8_dtype_backward)
       self.fp8_meta['recipe'] = recipe_copy
     else:
       outputs = tf.matmul(a=inputs, b=self.kernel)
