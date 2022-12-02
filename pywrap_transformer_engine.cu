@@ -130,7 +130,7 @@ PYBIND11_MODULE(_pywrap_transformer_engine, m) {
       fp8e5m2* output_cast = reinterpret_cast<fp8e5m2*>(output_data);
       transformer_engine::VectorizedUnaryKernelLauncher<
           nvec, detail::Empty, detail::identity>(
-              input_data, output_data, scale_data, scale_inv_data, amax_data, num_elements, {}, stream);
+              input_data, output_cast, scale_data, scale_inv_data, amax_data, num_elements, {}, stream);
     }
   });
   m.def("fp8_gemm", [](const pybind11::handle& a_handle,
