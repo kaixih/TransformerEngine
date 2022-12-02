@@ -12,7 +12,7 @@ from pydantic.dataclasses import dataclass
 from keras import backend
 from tensorflow.keras.layers import Layer
 
-nvlib = ctypes.cdll.LoadLibrary("./cu_demo.so")
+import _pywrap_transformer_engine
 
 _FP8_ENABLED = False
 _FP8_RECIPE = None
@@ -250,8 +250,8 @@ def get_fp8_te_dtype(
   if fp8_recipe.fp8_format == Format.E4M3 or (
       fp8_recipe.fp8_format == Format.HYBRID and fprop_tensor
   ):
-    return 0
-  return 1
+    return _pywrap_transformer_engine.FP8_E4M3
+  return _pywrap_transformer_engine.FP8_E5M2
 
 @contextmanager
 def fp8_autocast(
@@ -282,46 +282,28 @@ def fp8_autocast(
         _amax_forward_global_reduce_func()
       delete_key_from_amax_buffer(forward=True)
 
-def cast_to_fp8_wrapper(inp, fp8_meta, amax_index, fwd, dtype):
+def cast_to_fp8_wrapper(inp, fp8_meta, amax_index, fwd, output_dtype):
   scaling_key = "scaling_fwd" if fwd else "scaling_bwd"
-  inp_shape = inp.shape
   x = inp
-  x_cpu = np.copy(x).flatten()
   scale = fp8_meta[scaling_key]["scale"][amax_index]
-  scale_cpu = np.copy(scale).flatten()
   amax = fp8_meta[scaling_key]["amax_history"][0][amax_index]
-  amax_cpu = np.copy(amax).flatten()
   scale_inv = fp8_meta[scaling_key]["scale_inv"][amax_index]
-  scale_inv_cpu = np.copy(scale_inv).flatten()
   x_fp8 = tf.zeros(inp.shape, dtype=tf.int8)
-  x_fp8_cpu = np.copy(x_fp8).flatten()
-
-  nvlib.cast_to_fp8(ctypes.c_void_p(x_cpu.ctypes.data),
-                    ctypes.c_void_p(scale_cpu.ctypes.data),
-                    ctypes.c_void_p(amax_cpu.ctypes.data),
-                    ctypes.c_void_p(scale_inv_cpu.ctypes.data),
-                    ctypes.c_void_p(x_fp8_cpu.ctypes.data),
-                    ctypes.c_size_t(x.shape[0]),
-                    ctypes.c_size_t(x.shape[1]),
-                    ctypes.c_int(dtype))
-
-  x_fp8 = tf.convert_to_tensor(x_fp8_cpu.reshape(inp_shape))
-
-  scale_inv = tf.convert_to_tensor(scale_inv_cpu)
+  
+  _pywrap_transformer_engine.cast_to_fp8(x, scale, x_fp8, scale_inv, amax, output_dtype)
+  
   new_tensor = tf.tensor_scatter_nd_update(
-      fp8_meta[scaling_key]["scale_inv"], [[amax_index]], scale_inv)
+      fp8_meta[scaling_key]["scale_inv"], [[amax_index]], tf.expand_dims(scale_inv, axis=0))
   fp8_meta[scaling_key]["scale_inv"] = new_tensor
-
-  amax = tf.convert_to_tensor(amax_cpu)
   new_tensor = tf.tensor_scatter_nd_update(
-      fp8_meta[scaling_key]["amax_history"], [[0, amax_index]], amax)
+      fp8_meta[scaling_key]["amax_history"], [[0, amax_index]], tf.expand_dims(amax, axis=0))
   fp8_meta[scaling_key]["amax_history"] = new_tensor
   return x_fp8
 
 
 def fp8_matmul_wrapper(inp, weight, fp8_meta, mode, A_dtype, B_dtype):
   A = inp
-  A_cpu = np.copy(A).flatten()
+  B = weight
   if mode == 'fwd':
     A_scale_inv = fp8_meta["scaling_fwd"]["scale_inv"][0]
     B_scale_inv = fp8_meta["scaling_fwd"]["scale_inv"][1]
@@ -332,35 +314,12 @@ def fp8_matmul_wrapper(inp, weight, fp8_meta, mode, A_dtype, B_dtype):
     A_scale_inv = fp8_meta["scaling_fwd"]["scale_inv"][0]
     B_scale_inv = fp8_meta["scaling_bwd"]["scale_inv"][0]
 
-  A_scale_inv_cpu = np.copy(A_scale_inv).flatten()
-
-  B = weight
-  B_cpu = np.copy(B).flatten()
-  B_scale_inv_cpu = np.copy(B_scale_inv).flatten()
-
   # weight is actually transposed weight
   D_shape = (A.shape[0], B.shape[0])
   D = tf.zeros(D_shape, dtype=tf.float32)
-  D_cpu = np.copy(D).flatten()
 
-  nvlib.fp8_gemm(ctypes.c_void_p(B_cpu.ctypes.data),
-                 ctypes.c_void_p(B_scale_inv_cpu.ctypes.data),
-                 ctypes.c_int(B_dtype),
-                 ctypes.c_void_p(A_cpu.ctypes.data),
-                 ctypes.c_void_p(A_scale_inv_cpu.ctypes.data),
-                 ctypes.c_int(A_dtype),
-                 ctypes.c_void_p(D_cpu.ctypes.data),
-                 ctypes.c_int(B.shape[0]),
-                 ctypes.c_int(B.shape[1]),
-                 ctypes.c_int(A.shape[0]),
-                 ctypes.c_int(A.shape[1]),
-                 ctypes.c_bool(True),
-                 ctypes.c_bool(False),
-                 ctypes.c_bool(False),
-                 ctypes.c_bool(False),
-                 ctypes.c_bool(False))
+  _pywrap_transformer_engine.fp8_gemm(B, B_scale_inv, B_dtype, A, A_scale_inv, A_dtype, D, True, False, False, False, False)
 
-  D = tf.convert_to_tensor(D_cpu.reshape(D_shape))
   return D
 
 
@@ -501,10 +460,11 @@ class MyDense(Layer):
       self,
       inp: tf.Tensor,
       fp8_meta: Dict[str, Any],
-      fp8_dtype_forward: bool,
-      fp8_dtype_backward: bool,
+      fp8_dtype_forward: int,
+      fp8_dtype_backward: int,
       ) -> tf.Tensor:
-    weight = self.kernel
+    # Use value() to convert from Variable to EagerTensor
+    weight = self.kernel.value()
 
     x_fp8 = cast_to_fp8_wrapper(inp, fp8_meta, 0, True, fp8_dtype_forward)
     x_t_fp8 = tf.transpose(x_fp8)
