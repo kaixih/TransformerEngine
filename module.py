@@ -323,11 +323,9 @@ def fp8_matmul_wrapper(inp, weight, fp8_meta, mode, A_dtype, B_dtype):
   return D
 
 
-class Dense(Layer):
-  def __init__(self, units, kernel_initializer, **kwargs):
-    super().__init__(**kwargs)
-    self.units = int(units) if not isinstance(units, int) else units
-    self.kernel_initializer = kernel_initializer
+class Dense(tf.keras.layers.Dense):
+  def __init__(self, units, **kwargs):
+    super(Dense, self).__init__(units, **kwargs)
 
     # fp8 related
     self.fp8 = False
@@ -338,16 +336,10 @@ class Dense(Layer):
 
 
   def build(self, input_shape):
+    super(Dense, self).build(input_shape)
+    
     input_shape = tf.TensorShape(input_shape)
     last_dim = tf.compat.dimension_value(input_shape[-1])
-    self.kernel = self.add_weight(
-            "kernel",
-            shape=[last_dim, self.units],
-            dtype=self.dtype,
-            trainable=True,
-            initializer=self.kernel_initializer,
-        )
-
     # fp8 related
     self.fp8_weight_shapes.append((last_dim, self.units))
 
@@ -498,6 +490,8 @@ class Dense(Layer):
 
 
   def call(self, inputs, training=None):
+    # self.pre_forward needs to be called outside the following branch, since
+    # it will set the self.fp8 if the autocast is detected.
     training = self._get_training_value(training)
     self.pre_forward(inputs, training)
 
@@ -515,6 +509,17 @@ class Dense(Layer):
                                 fp8_dtype_backward)
       self.fp8_meta['recipe'] = recipe_copy
     else:
-      outputs = tf.matmul(a=inputs, b=self.kernel)
+      outputs = super(Dense, self).call(inputs)
 
     return outputs
+
+  def get_config(self):
+    config = super(Dense, self).get_config()
+    config.update(
+        {
+            "fp8": self.fp8,
+            "fp8_meta": self.fp8_meta,
+            "fp8_meta_tensors_initialized": self.fp8_meta_tensors_initialized,
+            "fp8_weight_shapes": self.fp8_weight_shapes,
+        }
+    )
