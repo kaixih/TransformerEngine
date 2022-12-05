@@ -323,7 +323,7 @@ def fp8_matmul_wrapper(inp, weight, fp8_meta, mode, A_dtype, B_dtype):
   return D
 
 
-class MyDense(Layer):
+class Dense(Layer):
   def __init__(self, units, kernel_initializer, **kwargs):
     super().__init__(**kwargs)
     self.units = int(units) if not isinstance(units, int) else units

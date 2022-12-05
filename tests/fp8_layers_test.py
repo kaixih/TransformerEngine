@@ -14,7 +14,7 @@ import numpy as np
 import module as te
 import tensorflow as tf
 
-from module import MyDense, DelayedScaling, Format
+from module import Dense, DelayedScaling, Format
 from tensorflow.python.framework import test_util
 from tensorflow.python.platform import test
 
@@ -49,7 +49,7 @@ class Fp8LayersTest(test.TestCase):
       def int_initializer(shape, dtype=None):
         return tf.round(initializer(shape, dtype))
 
-      fp8_dense = MyDense(units, kernel_initializer=int_initializer)
+      fp8_dense = Dense(units, kernel_initializer=int_initializer)
       fp8_dense.build(input_shape=input_shape)
       fp8_recipe = DelayedScaling(margin=0, interval=1,
                                   fp8_format=Format.HYBRID,

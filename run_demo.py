@@ -1,12 +1,12 @@
 import module as te
 import tensorflow as tf
 
-from module import MyDense, DelayedScaling, Format
+from module import Dense, DelayedScaling, Format
 
 input_shape = (16, 32)
 initializer = tf.keras.initializers.RandomNormal(mean=0., stddev=1., seed=12)
 
-my_dense = MyDense(16, kernel_initializer=initializer)
+my_dense = Dense(16, kernel_initializer=initializer)
 my_dense.build(input_shape=input_shape)
 
 my_dense_ref = tf.keras.layers.Dense(16, kernel_initializer=initializer,
