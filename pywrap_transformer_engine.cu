@@ -22,6 +22,7 @@
 
 using fp8e4m3 = __nv_fp8_e4m3;
 using fp8e5m2 = __nv_fp8_e5m2;
+using bfloat16 = nv_bfloat16;
 
 namespace detail {
 
@@ -140,6 +141,8 @@ PYBIND11_MODULE(_pywrap_transformer_engine, m) {
                        const pybind11::handle& b_scale_inv_handle,
                        const int b_dtype_in,
                        const pybind11::handle& d_handle,
+                       const bool use_bias,
+                       const pybind11::handle& bias_handle,
                        const bool transa, const bool transb, const bool grad,
                        const bool accumulate, const bool use_split_accumulate) {
     // Get eager tensors.
@@ -148,11 +151,14 @@ PYBIND11_MODULE(_pywrap_transformer_engine, m) {
     CHECK(EagerTensor_CheckExact(b_handle.ptr())) << "Input n must be an EagerTensor.";
     CHECK(EagerTensor_CheckExact(b_scale_inv_handle.ptr())) << "Input b_scale_inv tensor must be an EagerTensor.";
     CHECK(EagerTensor_CheckExact(d_handle.ptr())) << "Output d must be an EagerTensor.";
+    
     TFE_TensorHandle* a_tensor = EagerTensor_Handle(a_handle.ptr());
     TFE_TensorHandle* a_scale_inv_tensor = EagerTensor_Handle(a_scale_inv_handle.ptr());
     TFE_TensorHandle* b_tensor = EagerTensor_Handle(b_handle.ptr());
     TFE_TensorHandle* b_scale_inv_tensor = EagerTensor_Handle(b_scale_inv_handle.ptr());
     TFE_TensorHandle* d_tensor = EagerTensor_Handle(d_handle.ptr());
+    TFE_TensorHandle* bias_tensor;
+    
 
     // Check types.
     CHECK_EQ(TF_INT8, TFE_TensorHandleDataType(a_tensor)) << "Input a must have type int8.";
@@ -171,6 +177,13 @@ PYBIND11_MODULE(_pywrap_transformer_engine, m) {
     CheckTensorIsOnGPU(b_tensor);
     CheckTensorIsOnGPU(b_scale_inv_tensor);
     CheckTensorIsOnGPU(d_tensor);
+
+    if (use_bias) {
+      CHECK(EagerTensor_CheckExact(bias_handle.ptr())) << "Bias must be an EagerTensor.";
+      bias_tensor = EagerTensor_Handle(bias_handle.ptr());
+      CHECK_EQ(TF_BFLOAT16, TFE_TensorHandleDataType(bias_tensor)) << "Bias must have type bfloat16.";
+      CheckTensorIsOnGPU(d_tensor);
+    }
 
     // Get dimensions.
     TF_Status* status = TF_NewStatus();
@@ -195,8 +208,11 @@ PYBIND11_MODULE(_pywrap_transformer_engine, m) {
     CHECK_EQ(TF_OK, TF_GetCode(status)) << TF_Message(status);
     float* d_data = static_cast<float*>(TFE_TensorHandleDevicePointer(d_tensor, status));
     CHECK_EQ(TF_OK, TF_GetCode(status)) << TF_Message(status);
+    bfloat16* bias_data = nullptr;
+    if (use_bias) {
+      bias_data = static_cast<bfloat16*>(TFE_TensorHandleDevicePointer(bias_tensor, status));
+    }
     TF_DeleteStatus(status);
-    float* bias_data = nullptr;
 
     int workspaceSize = 33'554'432;
     void* workspace = nullptr;
