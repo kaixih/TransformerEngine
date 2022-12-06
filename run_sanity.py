@@ -24,16 +24,19 @@ def train_step(x, use_fp8):
   dx, dweight, dbias = tape.gradient(loss, [x, kernel, bias])
   return y, dx, dweight, dbias
 
-for i in range(4):
-  x = tf.random.normal(input_shape)
+x = tf.random.normal(input_shape)
 
-  y, dx, dw, dbias = train_step(x, True)
-  
-  print("Iteration:", i)
-  print("Amax history fwd:", my_dense.fp8_meta["scaling_fwd"]["amax_history"])
-  print("Amax history bwd:", my_dense.fp8_meta["scaling_bwd"]["amax_history"])
+y, dx, dw, dbias = train_step(x, True)
+y_ref, dx_ref, dw_ref, dbias_ref = train_step(x, False)
 
-  print("Results:", y[0])
-  print("Bwd dx:", dx[0])
-  print("Bwd dweight:", dw[0:2])
-  print("Bwd dbias:", dbias)
+print("Results:", y[0])
+print("Reference Results:", y_ref[0])
+
+print("Bwd dx:", dx[0])
+print("Reference dx:", dx_ref[0])
+
+print("Bwd dweight:", dw[0:2])
+print("Reference Bwd dweight:", dw_ref[0:2])
+
+print("Bwd dbias:", dbias)
+print("Reference Bwd dbias:", dbias_ref)

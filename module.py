@@ -143,8 +143,6 @@ def amax_and_scale_update(
   sf_compute = fp8_meta["recipe"].scaling_factor_compute_algo
   fp8_meta_tensor_key = "scaling_fwd" if fwd_update else "scaling_bwd"
   fp8_max_key = "fp8_max_fwd" if fwd_update else "fp8_max_bwd"
-  print("XXX amax_history", fp8_meta_tensor_key,
-        fp8_meta[fp8_meta_tensor_key]["amax_history"])
 
   if not callable(amax_compute) and sf_compute is None:
     (

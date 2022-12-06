@@ -28,6 +28,7 @@ nvcc pywrap_transformer_engine.cu -Xcompiler -fPIC -shared \
 Sanity test:
 
 ```bash
+python run_sanity.py
 python run_demo.py
 ```
 
