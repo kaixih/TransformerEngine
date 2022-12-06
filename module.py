@@ -464,8 +464,13 @@ class Dense(tf.keras.layers.Dense):
       bias_dtype = tf.bfloat16 if self.dtype == tf.float32 else self.dtype
       bias = tf.cast(self.bias, dtype=bias_dtype)
 
+    # TODO(trevor): Replace the separate cast and transpose with one single
+    # fp8_cast_transpose_fused
     x_fp8 = cast_to_fp8_wrapper(inp, fp8_meta, 0, True, fp8_dtype_forward)
     x_t_fp8 = tf.transpose(x_fp8)
+
+    # TODO(trevor): Replace the separate cast and transpose with one single
+    # fp8_cast_transpose_fused
     weight_fp8 = cast_to_fp8_wrapper(kernel_val, fp8_meta, 1, True,
                                      fp8_dtype_forward)
     weight_t_fp8 = tf.transpose(weight_fp8)
@@ -476,9 +481,14 @@ class Dense(tf.keras.layers.Dense):
 
     def grad_fn(upstream, variables):
       self.pre_backward(self.fp8_meta)
+      # TODO(trevor): Replace the separate cast and transpose with one single
+      # fp8_cast_transpose_fused; Also, if self.use_bias is True, use single
+      # fp8_cast_transpose_bgrad_fused.
       grad_fp8 = cast_to_fp8_wrapper(upstream, fp8_meta, 0, False,
                                      fp8_dtype_backward)
       grad_t_fp8 = tf.transpose(grad_fp8)
+      if self.use_bias:
+        grad_bias = tf.reduce_sum(upstream, axis=-1)
 
       grad_x = fp8_matmul_wrapper(grad_fp8, weight_fp8, fp8_meta, 'bwd_input',
                                   fp8_dtype_backward, fp8_dtype_forward)
@@ -492,7 +502,6 @@ class Dense(tf.keras.layers.Dense):
 
       grad_vars = [grad_weight]
       if self.use_bias:
-        grad_bias = tf.reduce_sum(upstream, axis=-1)
         grad_vars.append(grad_bias)
       return grad_inputs, grad_vars
   

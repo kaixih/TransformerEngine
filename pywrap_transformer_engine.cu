@@ -22,7 +22,6 @@
 
 using fp8e4m3 = __nv_fp8_e4m3;
 using fp8e5m2 = __nv_fp8_e5m2;
-using bfloat16 = nv_bfloat16;
 
 namespace detail {
 
@@ -33,6 +32,20 @@ __device__ inline float identity(float value, const Empty&) {
 }
 
 }  // namespace detail
+
+cudaDataType_t GetCublasltDtype(TF_DataType tf_dtype) {
+  switch(tf_dtype) {
+    case TF_DataType::TF_FLOAT:
+      return CUDA_R_32F;
+    case TF_DataType::TF_BFLOAT16:
+      return CUDA_R_16BF;
+    case TF_DataType::TF_HALF:
+      return CUDA_R_16F;
+    default:
+      // TODO(kaixih): add other dtypes.
+      return CUDA_R_32F;
+  }
+}
 
 void CheckTensorIsOnGPU(TFE_TensorHandle* tensor) {
   TF_Status* status = TF_NewStatus();
@@ -95,45 +108,65 @@ PYBIND11_MODULE(_pywrap_transformer_engine, m) {
     TF_Status* status = TF_NewStatus();
     int64_t num_elements = TFE_TensorHandleNumElements(input_tensor, status);
     CHECK_EQ(TF_OK, TF_GetCode(status)) << TF_Message(status);
-    int64_t scale_num_elements = TFE_TensorHandleNumElements(scale_tensor, status);
+    int64_t scale_num_elements = TFE_TensorHandleNumElements(scale_tensor,
+                                                             status);
     CHECK_EQ(TF_OK, TF_GetCode(status)) << TF_Message(status);
     CHECK_EQ(scale_num_elements, 1) << "Scale must be a scalar.";
-    int64_t output_num_elements = TFE_TensorHandleNumElements(output_tensor, status);
+    int64_t output_num_elements = TFE_TensorHandleNumElements(output_tensor,
+                                                              status);
     CHECK_EQ(TF_OK, TF_GetCode(status)) << TF_Message(status);
-    CHECK_EQ(num_elements, output_num_elements) << "Input and output must have same number of elements.";
-    int64_t scale_inv_num_elements = TFE_TensorHandleNumElements(scale_inv_tensor, status);
+    CHECK_EQ(num_elements, output_num_elements) << "Input and output must have "
+                                                   "same number of elements.";
+    int64_t scale_inv_num_elements = TFE_TensorHandleNumElements(
+                                         scale_inv_tensor, status);
     CHECK_EQ(TF_OK, TF_GetCode(status)) << TF_Message(status);
     CHECK_EQ(scale_inv_num_elements, 1) << "Scale_inv must be a scalar.";
-    int64_t amax_num_elements = TFE_TensorHandleNumElements(amax_tensor, status);
+    int64_t amax_num_elements = TFE_TensorHandleNumElements(amax_tensor,
+                                                            status);
     CHECK_EQ(TF_OK, TF_GetCode(status)) << TF_Message(status);
     CHECK_EQ(amax_num_elements, 1) << "Amax must be a scalar.";
 
     // Get device pointers
-    float* input_data = static_cast<float*>(TFE_TensorHandleDevicePointer(input_tensor, status));
+    float* input_data = reinterpret_cast<float*>(
+        TFE_TensorHandleDevicePointer(input_tensor, status));
     CHECK_EQ(TF_OK, TF_GetCode(status)) << TF_Message(status);
-    float* scale_data = static_cast<float*>(TFE_TensorHandleDevicePointer(scale_tensor, status));
+    float* scale_data = reinterpret_cast<float*>(
+        TFE_TensorHandleDevicePointer(scale_tensor, status));
     CHECK_EQ(TF_OK, TF_GetCode(status)) << TF_Message(status);
-    fp8e4m3* output_data = static_cast<fp8e4m3*>(TFE_TensorHandleDevicePointer(output_tensor, status));
+    void* output_data = TFE_TensorHandleDevicePointer(output_tensor, status);
     CHECK_EQ(TF_OK, TF_GetCode(status)) << TF_Message(status);
-    float* scale_inv_data = static_cast<float*>(TFE_TensorHandleDevicePointer(scale_inv_tensor, status));
+    float* scale_inv_data = reinterpret_cast<float*>(
+        TFE_TensorHandleDevicePointer(scale_inv_tensor, status));
     CHECK_EQ(TF_OK, TF_GetCode(status)) << TF_Message(status);
-    float* amax_data = static_cast<float*>(TFE_TensorHandleDevicePointer(amax_tensor, status));
+    float* amax_data = reinterpret_cast<float*>(
+        TFE_TensorHandleDevicePointer(amax_tensor, status));
     CHECK_EQ(TF_OK, TF_GetCode(status)) << TF_Message(status);
     TF_DeleteStatus(status);
 
     constexpr int nvec = 32 / sizeof(float);
     cudaStream_t stream = 0;
     if (dtype == CUDA_R_8F_E4M3) {
+      fp8e4m3* output_data_fp8 = reinterpret_cast<fp8e4m3*>(output_data);
       transformer_engine::VectorizedUnaryKernelLauncher<
-          nvec, detail::Empty, detail::identity>(input_data, output_data, scale_data, scale_inv_data,
-                                                 amax_data, num_elements, {}, stream);
+          nvec, detail::Empty, detail::identity>(input_data, output_data_fp8,
+                                                 scale_data, scale_inv_data,
+                                                 amax_data, num_elements, {},
+                                                 stream);
     } else {
-      fp8e5m2* output_cast = reinterpret_cast<fp8e5m2*>(output_data);
+      fp8e5m2* output_cast_fp8 = reinterpret_cast<fp8e5m2*>(output_data);
       transformer_engine::VectorizedUnaryKernelLauncher<
-          nvec, detail::Empty, detail::identity>(
-              input_data, output_cast, scale_data, scale_inv_data, amax_data, num_elements, {}, stream);
+          nvec, detail::Empty, detail::identity>(input_data, output_cast_fp8,
+                                                 scale_data, scale_inv_data,
+                                                 amax_data, num_elements, {},
+                                                 stream);
     }
   });
+  // TODO(trevor): can we expose the dtype as the enum class defined in
+  // transformer_engine::DType?
+  // Since the native TF tensor doesn't support the fp8 formats (i.e. e5m2 or
+  // e4m3) yet, we pass the a_dtype and b_dtype explicitly and the tensor with
+  // int8 storage format. d_dtype and bias_dtype can be obtained from the passed
+  // tensors.
   m.def("fp8_gemm", [](const pybind11::handle& a_handle,
                        const pybind11::handle& a_scale_inv_handle,
                        const int a_dtype_in,
@@ -166,6 +199,8 @@ PYBIND11_MODULE(_pywrap_transformer_engine, m) {
     CHECK_EQ(TF_INT8, TFE_TensorHandleDataType(b_tensor)) << "Input b must have type int8.";
     CHECK_EQ(TF_FLOAT, TFE_TensorHandleDataType(b_scale_inv_tensor)) << "Input b_scale_inv  must have type float32.";
     CHECK_EQ(TF_FLOAT, TFE_TensorHandleDataType(d_tensor)) << "Output d must have type float32.";
+    // TODO(trevor): Use functions like get_cuda_dtype() to convert
+    // transformer_engine::DType to cuBLASLt dtypes.
     auto a_dtype = static_cast<cudaDataType_t>(a_dtype_in);
     auto b_dtype = static_cast<cudaDataType_t>(b_dtype_in);
     CHECK(a_dtype == CUDA_R_8F_E4M3 || a_dtype == CUDA_R_8F_E5M2) << "output_dtype must be \"FP8_E4M3\" or \"FP8_E5M2\".";
@@ -178,11 +213,16 @@ PYBIND11_MODULE(_pywrap_transformer_engine, m) {
     CheckTensorIsOnGPU(b_scale_inv_tensor);
     CheckTensorIsOnGPU(d_tensor);
 
+    cudaDataType_t bias_dtype;
     if (use_bias) {
       CHECK(EagerTensor_CheckExact(bias_handle.ptr())) << "Bias must be an EagerTensor.";
       bias_tensor = EagerTensor_Handle(bias_handle.ptr());
-      CHECK_EQ(TF_BFLOAT16, TFE_TensorHandleDataType(bias_tensor)) << "Bias must have type bfloat16.";
-      CheckTensorIsOnGPU(d_tensor);
+      auto bias_dtype_tf = TFE_TensorHandleDataType(bias_tensor);
+      CHECK(bias_dtype_tf == TF_BFLOAT16 || bias_dtype_tf == TF_HALF ||
+            bias_dtype_tf == TF_FLOAT) << "bias_dtype must be \"BFLOAT16\" or "
+                                          "\"HALF\" or \"FLOAT\".";
+      bias_dtype = GetCublasltDtype(bias_dtype_tf);
+      CheckTensorIsOnGPU(bias_tensor);
     }
 
     // Get dimensions.
@@ -198,19 +238,19 @@ PYBIND11_MODULE(_pywrap_transformer_engine, m) {
     const int n = transb ? b_shape[1] : b_shape[0];
 
     // Get device pointers.
-    fp8e4m3* a_data = static_cast<fp8e4m3*>(TFE_TensorHandleDevicePointer(a_tensor, status));
+    void* a_data = TFE_TensorHandleDevicePointer(a_tensor, status);
     CHECK_EQ(TF_OK, TF_GetCode(status)) << TF_Message(status);
-    float* a_scale_inv_data = static_cast<float*>(TFE_TensorHandleDevicePointer(a_scale_inv_tensor, status));
+    void* a_scale_inv_data = TFE_TensorHandleDevicePointer(a_scale_inv_tensor, status);
     CHECK_EQ(TF_OK, TF_GetCode(status)) << TF_Message(status);
-    fp8e4m3* b_data = static_cast<fp8e4m3*>(TFE_TensorHandleDevicePointer(b_tensor, status));
+    void* b_data = TFE_TensorHandleDevicePointer(b_tensor, status);
     CHECK_EQ(TF_OK, TF_GetCode(status)) << TF_Message(status);
-    float* b_scale_inv_data = static_cast<float*>(TFE_TensorHandleDevicePointer(b_scale_inv_tensor, status));
+    void* b_scale_inv_data = TFE_TensorHandleDevicePointer(b_scale_inv_tensor, status);
     CHECK_EQ(TF_OK, TF_GetCode(status)) << TF_Message(status);
-    float* d_data = static_cast<float*>(TFE_TensorHandleDevicePointer(d_tensor, status));
+    void* d_data = TFE_TensorHandleDevicePointer(d_tensor, status);
     CHECK_EQ(TF_OK, TF_GetCode(status)) << TF_Message(status);
-    bfloat16* bias_data = nullptr;
+    void* bias_data = nullptr;
     if (use_bias) {
-      bias_data = static_cast<bfloat16*>(TFE_TensorHandleDevicePointer(bias_tensor, status));
+      bias_data = TFE_TensorHandleDevicePointer(bias_tensor, status);
     }
     TF_DeleteStatus(status);
 
@@ -235,8 +275,8 @@ PYBIND11_MODULE(_pywrap_transformer_engine, m) {
       LOG(FATAL) << "TT layout not allowed.";
     }
 
-    auto D_type = CUDA_R_32F;
-    auto bias_type = CUDA_R_16BF;
+    auto d_dtype_tf = TFE_TensorHandleDataType(d_tensor);
+    auto d_dtype = GetCublasltDtype(d_dtype_tf);
     cudaStream_t stream = 0;
     transformer_engine::cublas_gemm(a_data,
                                     a_scale_inv_data,
@@ -249,8 +289,8 @@ PYBIND11_MODULE(_pywrap_transformer_engine, m) {
                                     lda, ldb, ldd,
                                     a_dtype,
                                     b_dtype,
-                                    D_type,
-                                    bias_type,
+                                    d_dtype,
+                                    bias_dtype,
                                     (transa) ? CUBLAS_OP_T : CUBLAS_OP_N,
                                     (transb) ? CUBLAS_OP_T : CUBLAS_OP_N,
                                     /*bias=*/bias_data != nullptr,
