@@ -456,11 +456,13 @@ class Dense(tf.keras.layers.Dense):
       inp: tf.Tensor,
       fp8_meta: Dict[str, Any],
       fp8_dtype_forward: int,
-      fp8_dtype_backward: int,
-      use_bias: bool,
-      bias: tf.Tensor) -> tf.Tensor:
+      fp8_dtype_backward: int) -> tf.Tensor:
     # Use value() to convert from Variable to EagerTensor
     kernel_val = self.kernel.value()
+    bias = tf.zeros(())
+    if self.use_bias:
+      bias_dtype = tf.bfloat16 if self.dtype == tf.float32 else self.dtype
+      bias = tf.cast(self.bias, dtype=bias_dtype)
 
     x_fp8 = cast_to_fp8_wrapper(inp, fp8_meta, 0, True, fp8_dtype_forward)
     x_t_fp8 = tf.transpose(x_fp8)
@@ -469,8 +471,8 @@ class Dense(tf.keras.layers.Dense):
     weight_t_fp8 = tf.transpose(weight_fp8)
   
     outputs = fp8_matmul_wrapper(x_fp8, weight_t_fp8, fp8_meta, 'fwd',
-                                 fp8_dtype_forward, fp8_dtype_forward, use_bias,
-                                 bias)
+                                 fp8_dtype_forward, fp8_dtype_forward,
+                                 self.use_bias, bias)
 
     def grad_fn(upstream, variables):
       self.pre_backward(self.fp8_meta)
@@ -483,16 +485,15 @@ class Dense(tf.keras.layers.Dense):
       grad_weight = fp8_matmul_wrapper(x_t_fp8, grad_t_fp8, fp8_meta,
                                        'bwd_weight', fp8_dtype_forward,
                                        fp8_dtype_backward)
-      grad_bias = tf.reduce_sum(upstream, axis=-1)
 
-      # The fp8_meta contains 16 tensors which don't need grads.
       grad_inputs = [grad_x]
-      # TODO: two Nones are for use_bias and bias. Need to be updated.
-      grad_inputs.extend([None] * 16)
-      grad_inputs.append(grad_bias)
+      # The fp8_meta contains 15 tensors which don't need grads.
+      grad_inputs.extend([None] * 15)
 
-      grad_vars = []
-      grad_vars.append(grad_weight)
+      grad_vars = [grad_weight]
+      if self.use_bias:
+        grad_bias = tf.reduce_sum(upstream, axis=-1)
+        grad_vars.append(grad_bias)
       return grad_inputs, grad_vars
   
     return outputs, grad_fn
@@ -515,13 +516,8 @@ class Dense(tf.keras.layers.Dense):
                                             fprop_tensor=False)
       del self.fp8_meta['recipe']
 
-      bias = tf.zeros(())
-      if self.use_bias:
-        bias_dtype = tf.bfloat16 if self.dtype == tf.float32 else self.dtype
-        bias = tf.cast(self.bias, dtype=bias_dtype)
-
       outputs = self.fp8_matmul(inputs, self.fp8_meta, fp8_dtype_forward,
-                                fp8_dtype_backward, self.use_bias, bias)
+                                fp8_dtype_backward)
       self.fp8_meta['recipe'] = recipe_copy
     else:
       outputs = super(Dense, self).call(inputs)
