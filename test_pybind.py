@@ -16,6 +16,10 @@ b_amax = tf.zeros([], dtype=tf.float32)
 te.cast_to_fp8(b, b_scale, b_casted, b_scale_inv, b_amax, te.FP8_E4M3)
 
 d = tf.zeros([a.shape[0], b.shape[0]], dtype=tf.float32)
-te.fp8_gemm(b_casted, b_scale_inv, te.FP8_E4M3, a_casted, a_scale_inv, te.FP8_E4M3, d, True, False, False, False, False)
+
+use_bias = False
+bias = tf.zeros(())
+te.fp8_gemm(b_casted, b_scale_inv, te.FP8_E4M3, a_casted, a_scale_inv,
+            te.FP8_E4M3, d, use_bias, bias, True, False, False, False, False)
 
 print("d = ", d)
