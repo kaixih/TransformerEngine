@@ -344,4 +344,3 @@ void VectorizedUnaryKernelLauncher(const InputType *input,
 }  // namespace transformer_engine
 
 #endif  // TRANSFORMER_ENGINE_COMMON_UTIL_VECTORIZED_POINTWISE_H_
-
