@@ -1,7 +1,7 @@
-import module as te
+import transformer_engine.tensorflow.module as te
 import tensorflow as tf
 
-from module import Dense, DelayedScaling, Format
+from transformer_engine.tensorflow.module import Dense, DelayedScaling, Format
 
 input_shape = (16, 32)
 initializer = tf.keras.initializers.RandomNormal(mean=0., stddev=1., seed=12)

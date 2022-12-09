@@ -248,8 +248,16 @@ def get_fp8_te_dtype(
   if fp8_recipe.fp8_format == Format.E4M3 or (
       fp8_recipe.fp8_format == Format.HYBRID and fprop_tensor
   ):
-    return _pywrap_transformer_engine.FP8_E4M3
-  return _pywrap_transformer_engine.FP8_E5M2
+    return _pywrap_transformer_engine.Float8E4M3
+  return _pywrap_transformer_engine.Float8E5M2
+
+_cublas_workspace = None
+def get_workspace():
+    """Returns workspace for cublas."""
+    global _cublas_workspace
+    if _cublas_workspace is None:
+        _cublas_workspace = tf.zeros([33_554_432], dtype=tf.int8)
+    return _cublas_workspace
 
 @contextmanager
 def fp8_autocast(
@@ -286,9 +294,8 @@ def cast_to_fp8_wrapper(inp, fp8_meta, amax_index, fwd, output_dtype):
   scale = fp8_meta[scaling_key]["scale"][amax_index]
   amax = fp8_meta[scaling_key]["amax_history"][0][amax_index]
   scale_inv = fp8_meta[scaling_key]["scale_inv"][amax_index]
-  x_fp8 = tf.zeros(inp.shape, dtype=tf.int8)
   
-  _pywrap_transformer_engine.cast_to_fp8(x, scale, x_fp8, scale_inv, amax, output_dtype)
+  x_fp8 = _pywrap_transformer_engine.cast_to_fp8(x, scale, amax, scale_inv, output_dtype)
   
   new_tensor = tf.tensor_scatter_nd_update(
       fp8_meta[scaling_key]["scale_inv"], [[amax_index]], tf.expand_dims(scale_inv, axis=0))
@@ -318,7 +325,7 @@ def fp8_matmul_wrapper(inp, weight, fp8_meta, mode, A_dtype, B_dtype,
   D = tf.zeros(D_shape, dtype=tf.float32)
 
   _pywrap_transformer_engine.fp8_gemm(B, B_scale_inv, B_dtype, A, A_scale_inv,
-                                      A_dtype, D, use_bias, bias, True, False,
+                                      A_dtype, D, get_workspace(), use_bias, bias, True, False,
                                       False, False, False)
 
   return D
@@ -448,63 +455,63 @@ class Dense(tf.keras.layers.Dense):
 
     #add_amax_to_global_buffer(fp8_meta, forward=False)
 
-  @tf.custom_gradient
   def fp8_matmul(
       self,
       inp: tf.Tensor,
       fp8_meta: Dict[str, Any],
-      fp8_dtype_forward: int,
-      fp8_dtype_backward: int) -> tf.Tensor:
-    # Use value() to convert from Variable to EagerTensor
-    kernel_val = self.kernel.value()
-    bias = tf.zeros(())
-    if self.use_bias:
-      bias_dtype = tf.bfloat16 if self.dtype == tf.float32 else self.dtype
-      bias = tf.cast(self.bias, dtype=bias_dtype)
+      fp8_dtype_forward: _pywrap_transformer_engine.DType,
+      fp8_dtype_backward: _pywrap_transformer_engine.DType):
 
-    # TODO(trevor): Replace the separate cast and transpose with one single
-    # fp8_cast_transpose_fused
-    x_fp8 = cast_to_fp8_wrapper(inp, fp8_meta, 0, True, fp8_dtype_forward)
-    x_t_fp8 = tf.transpose(x_fp8)
+    @tf.custom_gradient
+    def fp8_matmul_func(x):
+      # Use value() to convert from Variable to EagerTensor
+      kernel_val = self.kernel.value()
+      bias = tf.zeros(())
+      if self.use_bias:
+        bias_dtype = tf.bfloat16 if self.dtype == tf.float32 else self.dtype
+        bias = tf.cast(self.bias, dtype=bias_dtype)
 
-    # TODO(trevor): Replace the separate cast and transpose with one single
-    # fp8_cast_transpose_fused
-    weight_fp8 = cast_to_fp8_wrapper(kernel_val, fp8_meta, 1, True,
-                                     fp8_dtype_forward)
-    weight_t_fp8 = tf.transpose(weight_fp8)
-  
-    outputs = fp8_matmul_wrapper(x_fp8, weight_t_fp8, fp8_meta, 'fwd',
-                                 fp8_dtype_forward, fp8_dtype_forward,
-                                 self.use_bias, bias)
-
-    def grad_fn(upstream, variables):
-      self.pre_backward(self.fp8_meta)
       # TODO(trevor): Replace the separate cast and transpose with one single
-      # fp8_cast_transpose_fused; Also, if self.use_bias is True, use single
-      # fp8_cast_transpose_bgrad_fused.
-      grad_fp8 = cast_to_fp8_wrapper(upstream, fp8_meta, 0, False,
-                                     fp8_dtype_backward)
-      grad_t_fp8 = tf.transpose(grad_fp8)
-      if self.use_bias:
-        grad_bias = tf.reduce_sum(upstream, axis=-1)
+      # fp8_cast_transpose_fused
+      x_fp8 = cast_to_fp8_wrapper(x, fp8_meta, 0, True, fp8_dtype_forward)
+      x_t_fp8 = tf.transpose(x_fp8)
 
-      grad_x = fp8_matmul_wrapper(grad_fp8, weight_fp8, fp8_meta, 'bwd_input',
-                                  fp8_dtype_backward, fp8_dtype_forward)
-      grad_weight = fp8_matmul_wrapper(x_t_fp8, grad_t_fp8, fp8_meta,
-                                       'bwd_weight', fp8_dtype_forward,
-                                       fp8_dtype_backward)
+      # TODO(trevor): Replace the separate cast and transpose with one single
+      # fp8_cast_transpose_fused
+      weight_fp8 = cast_to_fp8_wrapper(kernel_val, fp8_meta, 1, True,
+                                      fp8_dtype_forward)
+      weight_t_fp8 = tf.transpose(weight_fp8)
 
-      grad_inputs = [grad_x]
-      # The fp8_meta contains 15 tensors which don't need grads.
-      grad_inputs.extend([None] * 15)
+      outputs = fp8_matmul_wrapper(x_fp8, weight_t_fp8, fp8_meta, 'fwd',
+                                  fp8_dtype_forward, fp8_dtype_forward,
+                                  self.use_bias, bias)
 
-      grad_vars = [grad_weight]
-      if self.use_bias:
-        grad_vars.append(grad_bias)
-      return grad_inputs, grad_vars
-  
-    return outputs, grad_fn
+      def grad_fn(upstream, variables):
+        self.pre_backward(self.fp8_meta)
+        # TODO(trevor): Replace the separate cast and transpose with one single
+        # fp8_cast_transpose_fused; Also, if self.use_bias is True, use single
+        # fp8_cast_transpose_bgrad_fused.
+        grad_fp8 = cast_to_fp8_wrapper(upstream, fp8_meta, 0, False,
+                                      fp8_dtype_backward)
+        grad_t_fp8 = tf.transpose(grad_fp8)
+        if self.use_bias:
+          grad_bias = tf.reduce_sum(upstream, axis=-1)
 
+        grad_x = fp8_matmul_wrapper(grad_fp8, weight_fp8, fp8_meta, 'bwd_input',
+                                    fp8_dtype_backward, fp8_dtype_forward)
+        grad_weight = fp8_matmul_wrapper(x_t_fp8, grad_t_fp8, fp8_meta,
+                                        'bwd_weight', fp8_dtype_forward,
+                                        fp8_dtype_backward)
+
+        grad_inputs = [grad_x]
+        grad_vars = [grad_weight]
+        if self.use_bias:
+          grad_vars.append(grad_bias)
+        return grad_inputs, grad_vars
+    
+      return outputs, grad_fn
+
+    return fp8_matmul_func(inp)
 
   def call(self, inputs, training=None):
     # self.pre_forward needs to be called outside the following branch, since

@@ -903,4 +903,3 @@ __device__ __forceinline__ void reciprocal(T * value_inv, const T value) {
 }  // namespace transformer_engine
 
 #endif  // TRANSFORMER_ENGINE_COMMON_UTILS_CUH_
-

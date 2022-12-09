@@ -3,18 +3,11 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-# Adding the path to the module.py.
-# TODO: remove this when the building process is improved.
-import os
-import sys
-directory = os.path.dirname(os.path.abspath(__file__))
-sys.path.append(os.path.dirname(directory))
-
 import numpy as np
-import module as te
+import transformer_engine.tensorflow.module as te
 import tensorflow as tf
 
-from module import Dense, DelayedScaling, Format
+from transformer_engine.tensorflow.module import Dense, DelayedScaling, Format
 from tensorflow.python.framework import test_util
 from tensorflow.python.platform import test
 

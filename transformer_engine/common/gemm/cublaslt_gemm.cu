@@ -1,7 +1,15 @@
-#include "../common.h"
-#include "../logging.h"
-#include "../transformer_engine.h"
+/*************************************************************************
+ * Copyright (c) 2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ *
+ * See LICENSE for license information.
+ ************************************************************************/
+
+#include <transformer_engine/transformer_engine.h>
+#include <transformer_engine/logging.h>
+#include <transformer_engine/gemm.h>
 #include <cublasLt.h>
+#include <cublas_v2.h>
+#include "../common.h"
 
 namespace transformer_engine {
 
@@ -181,3 +189,95 @@ void cublas_gemm(void* A,
 }
 
 }  // namespace transformer_engine
+
+namespace {
+
+cudaDataType_t get_cuda_dtype(const transformer_engine::DType t) {
+  using namespace transformer_engine;
+  switch (t) {
+    case DType::kFloat16:
+      return CUDA_R_16F;
+    case DType::kFloat32:
+      return CUDA_R_32F;
+    case DType::kBFloat16:
+      return CUDA_R_16BF;
+    case DType::kFloat8E4M3:
+      return CUDA_R_8F_E4M3;
+    case DType::kFloat8E5M2:
+      return CUDA_R_8F_E5M2;
+    default:
+      NVTE_ERROR("Invalid type");
+  }
+}
+
+bool is_fp8_dtype(const transformer_engine::DType t) {
+  return t == transformer_engine::DType::kFloat8E4M3 ||
+         t == transformer_engine::DType::kFloat8E5M2;
+}
+
+}  // namespace
+
+void nvte_cublas_gemm(const NVTETensor A,
+                      const NVTETensor A_scale_inverse,
+                      const NVTETensor B,
+                      const NVTETensor B_scale_inverse,
+                      NVTETensor D,
+                      const NVTETensor bias,
+                      NVTETensor pre_gelu_out,
+                      bool transa,
+                      bool transb,
+                      bool grad,
+                      NVTETensor workspace,
+                      bool accumulate,
+                      bool use_split_accumulator,
+                      cudaStream_t stream) {
+  using namespace transformer_engine;
+  const Tensor *inputA = reinterpret_cast<const Tensor*>(A);
+  const Tensor *inputB = reinterpret_cast<const Tensor*>(B);
+  const Tensor *Ainvscale = reinterpret_cast<const Tensor*>(A_scale_inverse);
+  const Tensor *Binvscale = reinterpret_cast<const Tensor*>(B_scale_inverse);
+  Tensor *outputD = reinterpret_cast<Tensor*>(D);
+  const Tensor *biasTensor = reinterpret_cast<const Tensor*>(bias);
+  Tensor *outputGelu = reinterpret_cast<Tensor*>(pre_gelu_out);
+  Tensor *wspace = reinterpret_cast<Tensor*>(workspace);
+
+  const int m = transa ? inputA->shape[0] : inputA->shape[1];
+  const int k = transa ? inputA->shape[1] : inputA->shape[0];
+  const int n = transb ? inputB->shape[1] : inputB->shape[0];
+  int lda, ldb, ldd;
+  if (transa && !transb) {  // TN
+    lda = k;
+    ldb = k;
+    ldd = m;
+  } else if (!transa && !transb) {  // NN
+    lda = m;
+    ldb = k;
+    ldd = m;
+  } else if (!transa && transb) {  // NT
+    lda = m;
+    ldb = n;
+    ldd = m;
+  } else {  // TT
+    NVTE_ERROR("TT layout not allowed.");
+  }
+
+  cublas_gemm(inputA->dptr, Ainvscale->dptr,
+              inputB->dptr, Binvscale->dptr,
+              outputD->dptr, biasTensor->dptr,
+              outputGelu->dptr,
+              m, n, k,
+              lda, ldb, ldd,
+              get_cuda_dtype(inputA->dtype),
+              get_cuda_dtype(inputB->dtype),
+              get_cuda_dtype(outputD->dtype),
+              get_cuda_dtype(biasTensor->dtype),
+              (transa) ? CUBLAS_OP_T : CUBLAS_OP_N,
+              (transb) ? CUBLAS_OP_T : CUBLAS_OP_N,
+              biasTensor->dptr != nullptr,
+              outputGelu->dptr != nullptr,
+              grad, wspace->dptr,
+              wspace->shape[0],
+              is_fp8_dtype(inputA->dtype) || is_fp8_dtype(inputB->dtype),
+              accumulate, use_split_accumulator,
+              stream);
+}

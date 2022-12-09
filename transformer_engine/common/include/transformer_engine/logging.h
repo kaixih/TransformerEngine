@@ -46,4 +46,3 @@ inline void check_cublas_(cublasStatus_t status) {
 #define NVTE_CHECK_CUBLAS(ans) { check_cublas_(ans); }
 
 #endif  // TRANSFORMER_ENGINE_LOGGING_H_
-

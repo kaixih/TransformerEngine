@@ -239,4 +239,3 @@ class TensorWrapper {
 #endif
 
 #endif  // TRANSFORMER_ENGINE_TRANSFORMER_ENGINE_H_
-
