@@ -76,7 +76,7 @@ transformer_engine::TensorWrapper makeTransformerEngineTensor(const pybind11::ha
 
 void Deallocator(void* data, size_t unused, void* tensor_handle) {
   tensorflow::GPUOptions gpu_options;
-  tensorflow::TfDeviceId device_id(0);
+  tsl::TfDeviceId device_id(0);
   tensorflow::Allocator* allocator = tensorflow::GPUProcessState::singleton()->GetGPUAllocator(
       gpu_options, device_id, /*total_bytes=*/1, /*peer_gpu_ids=*/{});
   allocator->DeallocateRaw(data);
@@ -90,7 +90,7 @@ TFE_TensorHandle* AllocateTensor(std::vector<int64_t> shape, TF_DataType dtype, 
 
   // Allocate GPU memory.
   tensorflow::GPUOptions gpu_options;
-  tensorflow::TfDeviceId device_id(0);
+  tsl::TfDeviceId device_id(0);
   tensorflow::Allocator* allocator = tensorflow::GPUProcessState::singleton()->GetGPUAllocator(
       gpu_options, device_id, /*total_bytes=*/1, /*peer_gpu_ids=*/{});
   size_t num_bytes = size;
