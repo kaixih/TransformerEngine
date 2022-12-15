@@ -109,8 +109,8 @@ def _default_sf_compute(amax: tf.Tensor,
   exp = tf.math.floor(tf.experimental.numpy.log2(fp8_max / amax)) - margin
   sf = tf.math.round(tf.math.pow(2, tf.math.abs(exp)))
   sf = tf.where(amax > 0.0, sf, scale)
-  sf = tf.where(tf.math.is_inf(amax), sf, scale)
-  sf = tf.where(exp < 0, 1 / sf, sf)
+  sf = tf.where(tf.math.is_finite(amax), sf, scale)
+  sf = tf.where(exp < 0, 1.0 / sf, sf)
 
   return sf
 
