@@ -4,7 +4,6 @@ import _pywrap_transformer_engine as tex
 a = tf.random.normal([16, 32], dtype=tf.float32)
 a_scale = tf.constant(0.5, dtype=tf.float32)
 a_amax = tf.zeros([], dtype=tf.float32)
-a_scale_inv = tf.ones([], dtype=tf.float32)
 a_casted, a_amax, a_scale_inv = tex.cast_to_fp8(a, a_scale, a_amax, tex.DType.kFloat8E4M3)
 
 b = tf.random.normal([16, 16], dtype=tf.float32)
