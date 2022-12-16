@@ -163,7 +163,7 @@ TFE_TensorHandle* AllocateTensor(std::vector<int64_t> shape, TF_DataType dtype) 
 
 namespace {
 
-void UpdateAmaxTensor(transformer_engine::TensorWrapper& src,
+void UpdateAmaxTensor(const transformer_engine::TensorWrapper& src,
                       transformer_engine::TensorWrapper& dst) {
   auto ret = cudaMemcpy(dst.dptr(), src.dptr(), sizeof(float),
                         cudaMemcpyDeviceToDevice);
