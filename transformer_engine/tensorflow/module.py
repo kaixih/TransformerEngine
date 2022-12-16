@@ -12,7 +12,7 @@ from pydantic.dataclasses import dataclass
 from keras import backend
 from tensorflow.keras.layers import Layer
 
-import _pywrap_transformer_engine
+import _pywrap_transformer_engine as tex
 
 _FP8_ENABLED = False
 _FP8_RECIPE = None
@@ -248,8 +248,8 @@ def get_fp8_te_dtype(
   if fp8_recipe.fp8_format == Format.E4M3 or (
       fp8_recipe.fp8_format == Format.HYBRID and fprop_tensor
   ):
-    return _pywrap_transformer_engine.Float8E4M3
-  return _pywrap_transformer_engine.Float8E5M2
+    return tex.DType.kFloat8E4M3
+  return tex.DType.kFloat8E5M2
 
 _cublas_workspace = None
 def get_workspace():
@@ -288,23 +288,47 @@ def fp8_autocast(
         _amax_forward_global_reduce_func()
       delete_key_from_amax_buffer(forward=True)
 
-def cast_to_fp8_wrapper(inp, fp8_meta, amax_index, fwd, output_dtype):
+def cast_to_fp8_wrapper(x, fp8_meta, amax_index, fwd, output_dtype):
   scaling_key = "scaling_fwd" if fwd else "scaling_bwd"
-  x = inp
-  scale = fp8_meta[scaling_key]["scale"][amax_index]
-  amax = fp8_meta[scaling_key]["amax_history"][0][amax_index]
-  scale_inv = fp8_meta[scaling_key]["scale_inv"][amax_index]
-  
-  x_fp8 = _pywrap_transformer_engine.cast_to_fp8(x, scale, amax, scale_inv, output_dtype)
-  
-  new_tensor = tf.tensor_scatter_nd_update(
-      fp8_meta[scaling_key]["scale_inv"], [[amax_index]], tf.expand_dims(scale_inv, axis=0))
-  fp8_meta[scaling_key]["scale_inv"] = new_tensor
-  new_tensor = tf.tensor_scatter_nd_update(
-      fp8_meta[scaling_key]["amax_history"], [[0, amax_index]], tf.expand_dims(amax, axis=0))
-  fp8_meta[scaling_key]["amax_history"] = new_tensor
+  x_fp8, amax, scale_inv = tex.cast_to_fp8(
+      x,
+      fp8_meta[scaling_key]["scale"][amax_index.value],
+      fp8_meta[scaling_key]["amax_history"][0, amax_index.value],
+      output_dtype
+  )
+  fp8_meta[scaling_key]["amax_history"] = tf.tensor_scatter_nd_update(
+      fp8_meta[scaling_key]["amax_history"], [[0, amax_index.value]], amax)
+  fp8_meta[scaling_key]["scale_inv"] = tf.tensor_scatter_nd_update(
+      fp8_meta[scaling_key]["scale_inv"], [[amax_index.value]], scale_inv)
   return x_fp8
 
+def fp8_cast_transpose_fused_wrapper(x, fp8_meta, amax_index, fwd, output_dtype):
+  scaling_key = "scaling_fwd" if fwd else "scaling_bwd"
+  x_fp8, x_t_fp8, amax, scale_inv = tex.fp8_cast_transpose_fused(
+      x,
+      fp8_meta[scaling_key]["scale"][amax_index.value],
+      fp8_meta[scaling_key]["amax_history"][0, amax_index.value],
+      output_dtype
+  )
+  fp8_meta[scaling_key]["amax_history"] = tf.tensor_scatter_nd_update(
+      fp8_meta[scaling_key]["amax_history"], [[0, amax_index.value]], amax)
+  fp8_meta[scaling_key]["scale_inv"] = tf.tensor_scatter_nd_update(
+      fp8_meta[scaling_key]["scale_inv"], [[amax_index.value]], scale_inv)
+  return x_fp8, x_t_fp8
+
+def fp8_cast_transpose_bgrad_fused_wrapper(x, fp8_meta, amax_index, fwd, output_dtype):
+  scaling_key = "scaling_fwd" if fwd else "scaling_bwd"
+  grad_bias, grad_fp8, grad_t_fp8, amax, scale_inv = tex.fp8_cast_transpose_bgrad_fused(
+      x,
+      fp8_meta[scaling_key]["scale"][amax_index.value],
+      fp8_meta[scaling_key]["amax_history"][0, amax_index.value],
+      output_dtype
+  )
+  fp8_meta[scaling_key]["amax_history"] = tf.tensor_scatter_nd_update(
+      fp8_meta[scaling_key]["amax_history"], [[0, amax_index.value]], amax)
+  fp8_meta[scaling_key]["scale_inv"] = tf.tensor_scatter_nd_update(
+      fp8_meta[scaling_key]["scale_inv"], [[amax_index.value]], scale_inv)
+  return grad_bias, grad_fp8, grad_t_fp8
 
 def fp8_matmul_wrapper(inp, weight, fp8_meta, mode, A_dtype, B_dtype,
                        use_bias=False, bias=None):
@@ -320,15 +344,9 @@ def fp8_matmul_wrapper(inp, weight, fp8_meta, mode, A_dtype, B_dtype,
     A_scale_inv = fp8_meta["scaling_fwd"]["scale_inv"][0]
     B_scale_inv = fp8_meta["scaling_bwd"]["scale_inv"][0]
 
-  # weight is actually transposed weight
-  D_shape = (A.shape[0], B.shape[0])
-  D = tf.zeros(D_shape, dtype=tf.float32)
-
-  _pywrap_transformer_engine.fp8_gemm(B, B_scale_inv, B_dtype, A, A_scale_inv,
-                                      A_dtype, D, get_workspace(), use_bias, bias, True, False,
-                                      False, False, False)
-
-  return D
+  return tex.fp8_gemm(B, B_scale_inv, B_dtype, A, A_scale_inv, A_dtype,
+                      get_workspace(), use_bias, bias, True, False,  False, False,
+                      False)
 
 
 class Dense(tf.keras.layers.Dense):
@@ -459,8 +477,8 @@ class Dense(tf.keras.layers.Dense):
       self,
       inp: tf.Tensor,
       fp8_meta: Dict[str, Any],
-      fp8_dtype_forward: _pywrap_transformer_engine.DType,
-      fp8_dtype_backward: _pywrap_transformer_engine.DType):
+      fp8_dtype_forward: tex.DType,
+      fp8_dtype_backward: tex.DType):
 
     @tf.custom_gradient
     def fp8_matmul_func(x):
@@ -471,16 +489,10 @@ class Dense(tf.keras.layers.Dense):
         bias_dtype = tf.bfloat16 if self.dtype == tf.float32 else self.dtype
         bias = tf.cast(self.bias, dtype=bias_dtype)
 
-      # TODO(trevor): Replace the separate cast and transpose with one single
-      # fp8_cast_transpose_fused
-      x_fp8 = cast_to_fp8_wrapper(x, fp8_meta, 0, True, fp8_dtype_forward)
-      x_t_fp8 = tf.transpose(x_fp8)
-
-      # TODO(trevor): Replace the separate cast and transpose with one single
-      # fp8_cast_transpose_fused
-      weight_fp8 = cast_to_fp8_wrapper(kernel_val, fp8_meta, 1, True,
-                                      fp8_dtype_forward)
-      weight_t_fp8 = tf.transpose(weight_fp8)
+      x_fp8, x_t_fp8 = fp8_cast_transpose_fused_wrapper(
+          x, fp8_meta, tex.FP8FwdTensors.GEMM1_INPUT, True, fp8_dtype_forward)
+      weight_fp8, weight_t_fp8 = fp8_cast_transpose_fused_wrapper(
+          kernel_val, fp8_meta, tex.FP8FwdTensors.GEMM1_WEIGHT, True, fp8_dtype_forward)
 
       outputs = fp8_matmul_wrapper(x_fp8, weight_t_fp8, fp8_meta, 'fwd',
                                   fp8_dtype_forward, fp8_dtype_forward,
@@ -488,14 +500,12 @@ class Dense(tf.keras.layers.Dense):
 
       def grad_fn(upstream, variables):
         self.pre_backward(self.fp8_meta)
-        # TODO(trevor): Replace the separate cast and transpose with one single
-        # fp8_cast_transpose_fused; Also, if self.use_bias is True, use single
-        # fp8_cast_transpose_bgrad_fused.
-        grad_fp8 = cast_to_fp8_wrapper(upstream, fp8_meta, 0, False,
-                                      fp8_dtype_backward)
-        grad_t_fp8 = tf.transpose(grad_fp8)
         if self.use_bias:
-          grad_bias = tf.reduce_sum(upstream, axis=-1)
+          grad_bias, grad_fp8, grad_t_fp8 = fp8_cast_transpose_bgrad_fused_wrapper(
+              upstream, fp8_meta, tex.FP8BwdTensors.GRAD_OUTPUT1, False, fp8_dtype_backward)
+        else:
+          grad_fp8, grad_t_fp8 = fp8_cast_transpose_fused_wrapper(
+              upstream, fp8_meta, tex.FP8BwdTensors.GRAD_OUTPUT1, False, fp8_dtype_backward)
 
         grad_x = fp8_matmul_wrapper(grad_fp8, weight_fp8, fp8_meta, 'bwd_input',
                                     fp8_dtype_backward, fp8_dtype_forward)

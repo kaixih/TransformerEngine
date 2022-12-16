@@ -4,10 +4,10 @@ from __future__ import division
 from __future__ import print_function
 
 import numpy as np
-import transformer_engine.tensorflow.module as te
+import transformer_engine.tensorflow as te
 import tensorflow as tf
 
-from transformer_engine.tensorflow.module import Dense, DelayedScaling, Format
+from transformer_engine.tensorflow import Dense, DelayedScaling, Format
 from tensorflow.python.framework import test_util
 from tensorflow.python.platform import test
 
