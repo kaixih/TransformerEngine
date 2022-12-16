@@ -161,6 +161,17 @@ TFE_TensorHandle* AllocateTensor(std::vector<int64_t> shape, TF_DataType dtype) 
   return tensor;
 }
 
+namespace {
+
+void UpdateAmaxTensor(transformer_engine::TensorWrapper& src,
+                      transformer_engine::TensorWrapper& dst) {
+  auto ret = cudaMemcpy(dst.dptr(), src.dptr(), sizeof(float),
+                        cudaMemcpyDeviceToDevice);
+  CHECK_EQ(ret, cudaSuccess);
+}
+
+}  // end namespace
+
 PYBIND11_MODULE(_pywrap_transformer_engine, m) {
   py::enum_<transformer_engine::DType>(m, "DType")
     .value("kByte", transformer_engine::DType::kByte)
@@ -199,7 +210,8 @@ PYBIND11_MODULE(_pywrap_transformer_engine, m) {
     auto scale_inv_tensor = makeTransformerEngineTensor(scale_inv_eager);
     TFE_TensorHandle* amax_out_eager = AllocateTensor({1}, TF_FLOAT);
     auto amax_out_tensor = makeTransformerEngineTensor(amax_out_eager);
-    cudaMemcpy(amax_out_tensor.dptr(), amax_tensor.dptr(), sizeof(float), cudaMemcpyDeviceToDevice);
+
+    UpdateAmaxTensor(amax_tensor, amax_out_tensor);
 
     cudaStream_t stream = 0;
     nvte_fp8_quantize(input_tensor.data(), scale_tensor.data(), output_tensor.data(), amax_out_tensor.data(), scale_inv_tensor.data(), stream);
@@ -230,7 +242,8 @@ PYBIND11_MODULE(_pywrap_transformer_engine, m) {
     auto scale_inv_tensor = makeTransformerEngineTensor(scale_inv_eager);
     TFE_TensorHandle* amax_out_eager = AllocateTensor({1}, TF_FLOAT);
     auto amax_out_tensor = makeTransformerEngineTensor(amax_out_eager);
-    cudaMemcpy(amax_out_tensor.dptr(), amax_tensor.dptr(), sizeof(float), cudaMemcpyDeviceToDevice);
+
+    UpdateAmaxTensor(amax_tensor, amax_out_tensor);
 
     cudaStream_t stream = 0;
     nvte_cast_transpose(input_tensor.data(), scale_tensor.data(), output_cast_tensor.data(), output_transpose_tensor.data(), amax_out_tensor.data(), scale_inv_tensor.data(), stream);
@@ -266,7 +279,8 @@ PYBIND11_MODULE(_pywrap_transformer_engine, m) {
     auto scale_inv_tensor = makeTransformerEngineTensor(scale_inv_eager);
     TFE_TensorHandle* amax_out_eager = AllocateTensor({1}, TF_FLOAT);
     auto amax_out_tensor = makeTransformerEngineTensor(amax_out_eager);
-    cudaMemcpy(amax_out_tensor.dptr(), amax_tensor.dptr(), sizeof(float), cudaMemcpyDeviceToDevice);
+
+    UpdateAmaxTensor(amax_tensor, amax_out_tensor);
 
     cudaStream_t stream = 0;
     transformer_engine::TensorWrapper workspace;
