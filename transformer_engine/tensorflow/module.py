@@ -335,14 +335,20 @@ def fp8_matmul_wrapper(inp, weight, fp8_meta, mode, A_dtype, B_dtype,
   A = inp
   B = weight
   if mode == 'fwd':
-    A_scale_inv = fp8_meta["scaling_fwd"]["scale_inv"][0]
-    B_scale_inv = fp8_meta["scaling_fwd"]["scale_inv"][1]
+    A_scale_inv = fp8_meta["scaling_fwd"]["scale_inv"][
+                      tex.FP8FwdTensors.GEMM1_INPUT.value]
+    B_scale_inv = fp8_meta["scaling_fwd"]["scale_inv"][
+                      tex.FP8FwdTensors.GEMM1_WEIGHT.value]
   elif mode == 'bwd_input':
-    A_scale_inv = fp8_meta["scaling_bwd"]["scale_inv"][0]
-    B_scale_inv = fp8_meta["scaling_fwd"]["scale_inv"][1]
+    A_scale_inv = fp8_meta["scaling_bwd"]["scale_inv"][
+                      tex.FP8BwdTensors.GRAD_OUTPUT1.value]
+    B_scale_inv = fp8_meta["scaling_fwd"]["scale_inv"][
+                      tex.FP8FwdTensors.GEMM1_WEIGHT.value]
   elif mode == 'bwd_weight':
-    A_scale_inv = fp8_meta["scaling_fwd"]["scale_inv"][0]
-    B_scale_inv = fp8_meta["scaling_bwd"]["scale_inv"][0]
+    A_scale_inv = fp8_meta["scaling_fwd"]["scale_inv"][
+                      tex.FP8FwdTensors.GEMM1_INPUT.value]
+    B_scale_inv = fp8_meta["scaling_bwd"]["scale_inv"][
+                      tex.FP8BwdTensors.GRAD_OUTPUT1.value]
 
   return tex.fp8_gemm(B, B_scale_inv, B_dtype, A, A_scale_inv, A_dtype,
                       get_workspace(), use_bias, bias, True, False,  False, False,
